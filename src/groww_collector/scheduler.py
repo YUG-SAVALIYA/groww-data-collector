@@ -126,6 +126,7 @@ class DailyScheduler:
                     except Exception as purge_err:
                         logger.warning(f"Midnight log cleanup error: {purge_err}")
                     logger.info(f"--- New Day Begun: {curr_date} IST | Daily Tasks Reset & Garbage Collected ---")
+                    logger.info(f"[{now_ist.strftime('%H:%M:%S')} IST] Scheduler active & waiting. Current time: {now_ist.strftime('%I:%M %p')}. Next trigger: 3:55 PM IST.")
 
                 # Weekend Protection: Do NOT run any tasks on Saturday (5) or Sunday (6)
                 if self.config.skip_weekends and curr_date.weekday() >= 5:
