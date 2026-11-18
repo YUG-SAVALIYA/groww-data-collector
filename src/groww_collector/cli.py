@@ -90,7 +90,7 @@ def cleanup_old_logs_and_reports(logs_dir: Path, max_days: int = 21):
     if purged_count > 0:
         logging.info(f"Retention Enforcer: Cleaned {purged_count} files older than {max_days} days.")
 
-def parse_args():
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Groww Daily Candle Data Collection System (300 Workers, Desktop Auto-Storage, Segment Migrations)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -150,10 +150,14 @@ def parse_args():
         action="store_true",
         help="Enable detailed debug logging",
     )
-    return parser.parse_args()
+    return parser
 
-def main():
-    args = parse_args()
+def parse_args(argv=None):
+    parser = build_parser()
+    return parser, parser.parse_args(argv)
+
+def main(argv=None):
+    parser, args = parse_args(argv)
 
     # Build config
     config = CollectorConfig(
@@ -200,6 +204,13 @@ def main():
         except ValueError:
             logger.error(f"Invalid date format: {args.date}. Expected YYYY-MM-DD.")
             sys.exit(1)
+
+    # Default behavior if neither --task nor --daemon is provided
+    if not args.task and not args.daemon:
+        logger.info("No specific --task provided. Starting continuous background collection daemon.")
+        logger.info("Daily schedule: 3:55 PM (Sync), 4:00 PM (Fetch), 6:00 AM (Final Correction).")
+        logger.info("Tip: Run with -h or --help to see manual single-task options (e.g. --task verify_existing).")
+        args.daemon = True
 
     if args.daemon:
         scheduler = DailyScheduler(
