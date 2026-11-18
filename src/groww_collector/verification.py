@@ -18,7 +18,7 @@ from .config import CollectorConfig, DEFAULT_CONFIG, IST_TZ
 from .groww_client import GrowwAPIClient
 from .calendar_service import NSECalendarService
 from .parquet_store import ParquetStore, PARQUET_SCHEMA
-from .reports import DesktopStorageReport, ExistingDataVerificationReport
+from .reports import DesktopStorageReport, ExistingDataVerificationReport, CandleChangeRecord
 
 logger = logging.getLogger(__name__)
 
@@ -231,7 +231,7 @@ class DataVerificationService:
             def heal_company_gaps(item):
                 sym, missing_list = item
                 if not missing_list:
-                    return sym, 0, 0
+                    return sym, 0, 0, []
                 d_min = min(missing_list)
                 d_max = max(missing_list)
                 start_ms, end_ms = self.client.build_time_range_ms(d_min, d_max)
@@ -240,6 +240,7 @@ class DataVerificationService:
                 rec = 0
                 unres = len(missing_list)
                 missing_set = set(missing_list)
+                healed_items = []
 
                 for attempt in range(1, self.config.max_attempts + 1):
                     candles, status, err, _ = self.client.fetch_candles_single_attempt(sym, start_ms, end_ms)
@@ -251,6 +252,17 @@ class DataVerificationService:
                                 self.store.merge_and_save(sym, df_to_add)
                                 rec = len(df_to_add)
                                 unres = len(missing_list) - rec
+                                for _, row in df_to_add.iterrows():
+                                    healed_items.append(CandleChangeRecord(
+                                        symbol=sym,
+                                        target_date=str(row["datetime"])[:10],
+                                        change_type="HEALED",
+                                        open=float(row["open"]),
+                                        high=float(row["high"]),
+                                        low=float(row["low"]),
+                                        close=float(row["close"]),
+                                        volume=int(row["volume"]),
+                                    ))
                                 break
                     if status == 404:
                         break
@@ -274,15 +286,27 @@ class DataVerificationService:
                                 self.store.merge_and_save(sym, df_live)
                                 rec += 1
                                 unres = max(0, unres - 1)
+                                for _, row in df_live.iterrows():
+                                    healed_items.append(CandleChangeRecord(
+                                        symbol=sym,
+                                        target_date=str(row["datetime"])[:10],
+                                        change_type="HEALED",
+                                        open=float(row["open"]),
+                                        high=float(row["high"]),
+                                        low=float(row["low"]),
+                                        close=float(row["close"]),
+                                        volume=int(row["volume"]),
+                                    ))
 
-                return sym, rec, unres
+                return sym, rec, unres, healed_items
 
             with ThreadPoolExecutor(max_workers=min(self.config.max_workers, len(companies_needing_gap_fill))) as ex:
                 heal_results = list(ex.map(heal_company_gaps, companies_needing_gap_fill))
 
-            for _, rec, unres in heal_results:
+            for _, rec, unres, h_items in heal_results:
                 recovered_cnt += rec
                 unresolved_cnt += unres
+                verif_rep.healed_records.extend(h_items)
 
         verif_rep.total_complete_historical = len(companies_complete) + (len(companies_needing_gap_fill) - sum(1 for _, _, u in heal_results if u > 0) if companies_needing_gap_fill else 0)
         verif_rep.total_with_missing_candles = len(companies_needing_gap_fill)

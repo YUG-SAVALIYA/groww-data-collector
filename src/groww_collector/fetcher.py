@@ -267,6 +267,20 @@ class ConcurrencyFetchEngine:
                 return False, 0, 0, 0, "No valid candles after OHLCV validation"
 
             ins_cnt, upd_cnt, tot = self.store.merge_and_save(sym, df)
+
+            if ins_cnt > 0 or upd_cnt > 0:
+                last_row = df.iloc[-1]
+                o = float(last_row["open"])
+                h = float(last_row["high"])
+                l = float(last_row["low"])
+                c = float(last_row["close"])
+                v = int(last_row["volume"])
+                d_str = str(last_row["datetime"])[:10]
+                if ins_cnt > 0:
+                    rep_mgr.record_candle_change(sym, d_str, "ADDED", o, h, l, c, v)
+                elif upd_cnt > 0:
+                    rep_mgr.record_candle_change(sym, d_str, "UPDATED", o, h, l, c, v)
+
             return True, len(df), ins_cnt, upd_cnt, None
 
         self.execute_with_immediate_retries(

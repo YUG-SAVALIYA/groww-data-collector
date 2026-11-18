@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+import threading
 from datetime import datetime, date
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
@@ -17,6 +18,18 @@ import pandas as pd
 from .config import CollectorConfig, DEFAULT_CONFIG, IST_TZ
 
 logger = logging.getLogger(__name__)
+
+@dataclass
+class CandleChangeRecord:
+    """Record of an individual candle being added or updated."""
+    symbol: str
+    target_date: str
+    change_type: str  # "ADDED" or "UPDATED" or "HEALED"
+    open: float = 0.0
+    high: float = 0.0
+    low: float = 0.0
+    close: float = 0.0
+    volume: int = 0
 
 @dataclass
 class FetchAttemptRecord:
@@ -72,21 +85,35 @@ class ExistingDataVerificationReport:
     total_existing_candles_updated: int = 0
     total_duplicates_corrected: int = 0
     total_invalids_corrected: int = 0
+    healed_records: list[CandleChangeRecord] = field(default_factory=list)
 
     def format_text(self) -> str:
         pct = (self.total_complete_historical / self.total_companies_checked * 100) if self.total_companies_checked else 100.0
-        return (
-            "--------------------------------------------------------------------------------\n"
-            "  2. EXISTING DATA HEALTH & AUDIT CHECK\n"
-            "--------------------------------------------------------------------------------\n"
-            f"  * Total Companies Audited   : {self.total_companies_checked:,} companies\n"
-            f"  * 100% Complete History     : {self.total_complete_historical:,} companies ({pct:.1f}% of entire universe)\n"
-            f"  * Companies with Missing Day: {self.total_with_missing_candles:,} companies\n"
-            f"  * Missing Candles Recovered : {self.total_missing_candles_recovered:,} candles restored from Groww\n"
-            f"  * Genuinely Halted / Unavail: {self.total_missing_still_unresolved:,} (No trades on exchange - no fake candles made)\n"
-            f"  * Duplicate Dates Cleaned   : {self.total_duplicates_corrected:,} duplicate records removed\n"
-            f"  * Corrupt / Incomplete Rows Filtered: {self.total_invalids_corrected:,} rows cleaned (e.g. NaN volume, null values, or broken prices)\n\n"
-        )
+        lines = [
+            "--------------------------------------------------------------------------------\n",
+            "  2. EXISTING DATA HEALTH & AUDIT CHECK\n",
+            "--------------------------------------------------------------------------------\n",
+            f"  * Total Companies Audited   : {self.total_companies_checked:,} companies\n",
+            f"  * 100% Complete History     : {self.total_complete_historical:,} companies ({pct:.1f}% of entire universe)\n",
+            f"  * Companies with Missing Day: {self.total_with_missing_candles:,} companies\n",
+            f"  * Missing Candles Recovered : {self.total_missing_candles_recovered:,} candles restored from Groww\n",
+            f"  * Genuinely Halted / Unavail: {self.total_missing_still_unresolved:,} (No trades on exchange - no fake candles made)\n",
+            f"  * Duplicate Dates Cleaned   : {self.total_duplicates_corrected:,} duplicate records removed\n",
+            f"  * Corrupt / Incomplete Rows Filtered: {self.total_invalids_corrected:,} rows cleaned (e.g. NaN volume, null values, or broken prices)\n\n",
+        ]
+
+        if self.healed_records:
+            lines.append(f"  [HEALED / RESTORED CANDLES - {len(self.healed_records)} CANDLES]\n")
+            lines.append(f"  | {'Symbol':<12} | {'Date':<12} | {'Open':<10} | {'High':<10} | {'Low':<10} | {'Close':<10} | {'Volume':<12} |\n")
+            lines.append(f"  |{'-'*14}|{'-'*14}|{'-'*12}|{'-'*12}|{'-'*12}|{'-'*12}|{'-'*14}|\n")
+            for r in self.healed_records[:40]:
+                v_str = f"{r.volume:,}"
+                lines.append(f"  | {r.symbol:<12} | {r.target_date:<12} | {r.open:<10.2f} | {r.high:<10.2f} | {r.low:<10.2f} | {r.close:<10.2f} | {v_str:<12} |\n")
+            if len(self.healed_records) > 40:
+                lines.append(f"  ... and {len(self.healed_records) - 40} more healed candles.\n")
+            lines.append("\n")
+
+        return "".join(lines)
 
 @dataclass
 class NSEEQMigrationReport:
@@ -144,7 +171,7 @@ class NSEEQMigrationReport:
 
 @dataclass
 class InitialFetchReport:
-    """Section 4: Initial Network Fetch in Plain English."""
+    """Section 4: Daily Candle Collection Results in Plain English."""
     total_universe: int = 0
     total_requested: int = 0
     successful: int = 0
@@ -153,20 +180,46 @@ class InitialFetchReport:
     total_candles_received: int = 0
     total_new_inserted: int = 0
     total_existing_updated: int = 0
+    added_records: list[CandleChangeRecord] = field(default_factory=list)
+    updated_records: list[CandleChangeRecord] = field(default_factory=list)
 
     def format_text(self) -> str:
         pct = (self.successful / self.total_requested * 100) if self.total_requested else 0.0
-        return (
-            "--------------------------------------------------------------------------------\n"
-            "  4. INITIAL CONCURRENT FETCH RESULTS (300 Workers)\n"
-            "--------------------------------------------------------------------------------\n"
-            f"  * Total Companies Requested : {self.total_requested:,} companies\n"
-            f"  * Succeeded on First Attempt: {self.successful:,} companies ({pct:.2f}% first-try success!)\n"
-            f"  * Temporary API/Network Glitch: {self.api_network_errors:,} companies (Queued for immediate retry)\n"
-            f"  * Total Candles Downloaded  : {self.total_candles_received:,} daily candles\n"
-            f"  * Brand New Trading Days    : {self.total_new_inserted:,} candles added\n"
-            f"  * Existing Values Corrected : {self.total_existing_updated:,} candles revised with official figures\n\n"
-        )
+        lines = [
+            "--------------------------------------------------------------------------------\n",
+            "  DAILY CANDLE COLLECTION: ADDED & UPDATED CANDLES\n",
+            "--------------------------------------------------------------------------------\n",
+            f"  * Total Companies Requested : {self.total_requested:,} companies\n",
+            f"  * Succeeded on First Attempt: {self.successful:,} companies ({pct:.2f}% first-try success!)\n",
+            f"  * Temporary API Glitches    : {self.api_network_errors:,} companies (rescued by immediate retry)\n",
+            f"  * Total Candles Downloaded  : {self.total_candles_received:,} daily candles\n",
+            f"  * Newly Added Candles       : {self.total_new_inserted:,} candles added\n",
+            f"  * Revised / Updated Candles : {self.total_existing_updated:,} candles revised with official live figures\n\n",
+        ]
+
+        if self.added_records:
+            lines.append(f"  [NEWLY ADDED CANDLES - {len(self.added_records)} COMPANIES]\n")
+            lines.append(f"  | {'Symbol':<12} | {'Date':<12} | {'Open':<10} | {'High':<10} | {'Low':<10} | {'Close':<10} | {'Volume':<12} |\n")
+            lines.append(f"  |{'-'*14}|{'-'*14}|{'-'*12}|{'-'*12}|{'-'*12}|{'-'*12}|{'-'*14}|\n")
+            for r in self.added_records[:40]:
+                v_str = f"{r.volume:,}"
+                lines.append(f"  | {r.symbol:<12} | {r.target_date:<12} | {r.open:<10.2f} | {r.high:<10.2f} | {r.low:<10.2f} | {r.close:<10.2f} | {v_str:<12} |\n")
+            if len(self.added_records) > 40:
+                lines.append(f"  ... and {len(self.added_records) - 40} more newly added candles.\n")
+            lines.append("\n")
+
+        if self.updated_records:
+            lines.append(f"  [REVISED / UPDATED CANDLES - {len(self.updated_records)} COMPANIES]\n")
+            lines.append(f"  | {'Symbol':<12} | {'Date':<12} | {'Open':<10} | {'High':<10} | {'Low':<10} | {'Close':<10} | {'Volume':<12} |\n")
+            lines.append(f"  |{'-'*14}|{'-'*14}|{'-'*12}|{'-'*12}|{'-'*12}|{'-'*12}|{'-'*14}|\n")
+            for r in self.updated_records[:40]:
+                v_str = f"{r.volume:,}"
+                lines.append(f"  | {r.symbol:<12} | {r.target_date:<12} | {r.open:<10.2f} | {r.high:<10.2f} | {r.low:<10.2f} | {r.close:<10.2f} | {v_str:<12} |\n")
+            if len(self.updated_records) > 40:
+                lines.append(f"  ... and {len(self.updated_records) - 40} more revised candles.\n")
+            lines.append("\n")
+
+        return "".join(lines)
 
 @dataclass
 class RetryReport:
@@ -277,6 +330,34 @@ class ExecutionReportManager:
         self.unresolved_records: list[UnresolvedRecord] = []
         self.summary = FinalDailySummary(run_id=run_id, task_name=task_name)
         self.all_attempts: list[FetchAttemptRecord] = []
+        self._records_lock = threading.Lock()
+
+    def record_candle_change(
+        self,
+        symbol: str,
+        target_date: str,
+        change_type: str,
+        open_val: float,
+        high_val: float,
+        low_val: float,
+        close_val: float,
+        volume_val: int,
+    ):
+        rec = CandleChangeRecord(
+            symbol=symbol,
+            target_date=target_date,
+            change_type=change_type,
+            open=open_val,
+            high=high_val,
+            low=low_val,
+            close=close_val,
+            volume=volume_val,
+        )
+        with self._records_lock:
+            if change_type == "ADDED":
+                self.initial_report.added_records.append(rec)
+            elif change_type == "UPDATED":
+                self.initial_report.updated_records.append(rec)
 
     def log_attempt(self, attempt: FetchAttemptRecord):
         self.all_attempts.append(attempt)
