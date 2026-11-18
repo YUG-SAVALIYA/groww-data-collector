@@ -1,0 +1,267 @@
+"""Existing Folder and Data Verification Service.
+
+Verifies existing files, checks schemas and duplicates, compares data against
+the official NSE trading calendar from listing date, heals missing gaps in batch,
+and provisions new company files.
+"""
+
+from __future__ import annotations
+import time
+import logging
+from datetime import date, datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any
+import pandas as pd
+import pyarrow.parquet as pq
+
+from .config import CollectorConfig, DEFAULT_CONFIG, IST_TZ
+from .groww_client import GrowwAPIClient
+from .calendar_service import NSECalendarService
+from .parquet_store import ParquetStore, PARQUET_SCHEMA
+from .reports import DesktopStorageReport, ExistingDataVerificationReport
+
+logger = logging.getLogger(__name__)
+
+class DataVerificationService:
+    """Inspects, verifies, and repairs Parquet data for all NSE EQ companies."""
+
+    def __init__(
+        self,
+        config: CollectorConfig = DEFAULT_CONFIG,
+        client: GrowwAPIClient | None = None,
+        store: ParquetStore | None = None,
+        calendar: NSECalendarService | None = None,
+    ):
+        self.config = config
+        self.client = client or GrowwAPIClient(config)
+        self.store = store or ParquetStore(config)
+        self.calendar = calendar or NSECalendarService(config)
+
+    def verify_and_synchronize_universe(
+        self,
+        universe_symbols: list[str],
+        company_metadata: dict[str, dict[str, Any]] | None = None,
+    ) -> tuple[DesktopStorageReport, ExistingDataVerificationReport]:
+        """Execute full verification routine on existing folder.
+        
+        Returns:
+            (DesktopStorageReport, ExistingDataVerificationReport)
+        """
+        t0 = time.time()
+        logger.info(f"Starting Existing Folder and Data Verification on: {self.config.data_dir}...")
+
+        # 1. Desktop Storage Report metrics
+        desktop_rep = DesktopStorageReport(
+            desktop_detected=str(self.config.desktop_dir),
+            folder_path=str(self.config.data_dir),
+            folder_already_existed=self.config.folder_already_existed,
+        )
+
+        existing_files = {
+            f.name.replace("_Day.parquet", "").strip().upper(): f
+            for f in self.config.data_dir.glob("*_Day.parquet")
+        }
+        desktop_rep.total_existing_parquet_files = len(existing_files)
+
+        verif_rep = ExistingDataVerificationReport()
+
+        latest_session = self.calendar.get_latest_completed_session()
+        min_start_date = date(self.config.history_start_year, 1, 1)
+
+        case_a_symbols = []  # File exists
+        case_b_symbols = []  # File does not exist
+
+        for sym in universe_symbols:
+            if sym in existing_files:
+                case_a_symbols.append(sym)
+            else:
+                case_b_symbols.append(sym)
+
+        logger.info(
+            f"Verification breakdown: {len(case_a_symbols)} files exist (Case A), "
+            f"{len(case_b_symbols)} files missing (Case B)."
+        )
+
+        # ----------------------------------------------------
+        # Process Case A: Inspect existing files concurrently
+        # ----------------------------------------------------
+        companies_complete = []
+        companies_needing_gap_fill = []
+
+        def inspect_existing_file(sym: str):
+            fpath = existing_files[sym]
+            meta = (company_metadata or {}).get(sym, {})
+            l_dt_raw = meta.get("listing_date") or meta.get("Listing_Date") or ""
+            l_dt = None
+            if l_dt_raw:
+                try:
+                    l_dt = pd.to_datetime(l_dt_raw, format="%d-%b-%Y").date()
+                except Exception:
+                    try:
+                        l_dt = pd.to_datetime(l_dt_raw).date()
+                    except Exception:
+                        pass
+
+            exp_start = max(l_dt, min_start_date) if l_dt else min_start_date
+            expected_dates = set(self.calendar.get_expected_trading_sessions(exp_start, latest_session))
+
+            dates_present = set()
+            dup_cnt = 0
+            inv_cnt = 0
+            schema_ok = False
+
+            try:
+                # Check schema
+                s = pq.read_schema(fpath)
+                schema_ok = s.equals(PARQUET_SCHEMA)
+            except Exception:
+                schema_ok = False
+
+            try:
+                df = pd.read_parquet(fpath)
+                if not df.empty:
+                    dt_series = pd.to_datetime(df["datetime"]).dt.tz_convert(IST_TZ).dt.floor("D")
+                    dates_list = dt_series.dt.date.tolist()
+                    dup_cnt = len(dates_list) - len(set(dates_list))
+
+                    v_df, inv = self.store.parse_raw_candles_to_df(
+                        [[t.timestamp(), o, h, l, c, v] for t, o, h, l, c, v in zip(
+                            dt_series, df["open"], df["high"], df["low"], df["close"], df["volume"]
+                        )]
+                    )
+                    inv_cnt = inv
+
+                    if dup_cnt > 0 or not schema_ok or inv_cnt > 0:
+                        # Clean duplicates, corrupt rows, or normalize schema atomically
+                        self.store.merge_and_save(sym, v_df)
+
+                    dates_present = set(v_df["datetime"].dt.tz_convert(IST_TZ).dt.date.tolist())
+            except Exception as e:
+                logger.warning(f"Error inspecting {sym}: {e}")
+
+            missing = sorted(list(expected_dates - dates_present))
+            return {
+                "symbol": sym,
+                "dates_present": len(dates_present),
+                "expected_dates": len(expected_dates),
+                "missing": missing,
+                "duplicates": dup_cnt,
+                "invalids": inv_cnt,
+                "schema_ok": schema_ok,
+            }
+
+        with ThreadPoolExecutor(max_workers=min(32, max(1, len(case_a_symbols)))) as ex:
+            inspections = list(ex.map(inspect_existing_file, case_a_symbols))
+
+        desktop_rep.total_files_verified = len(inspections)
+        verif_rep.total_companies_checked = len(universe_symbols)
+
+        for res in inspections:
+            verif_rep.total_duplicates_corrected += res["duplicates"]
+            verif_rep.total_invalids_corrected += res["invalids"]
+            if not res["missing"]:
+                companies_complete.append(res["symbol"])
+            else:
+                companies_needing_gap_fill.append((res["symbol"], res["missing"]))
+
+        desktop_rep.total_files_already_complete = len(companies_complete)
+        desktop_rep.total_files_requiring_updates = len(companies_needing_gap_fill)
+
+        logger.info(
+            f"Inspection complete: {len(companies_complete)} files already complete (no re-download needed). "
+            f"{len(companies_needing_gap_fill)} files have missing dates to heal."
+        )
+
+        # ----------------------------------------------------
+        # Process Case B: Create new Parquet files for missing symbols
+        # ----------------------------------------------------
+        newly_created = 0
+        now_ms = int(datetime.now(IST_TZ).timestamp() * 1000)
+
+        def create_new_company_file(sym: str):
+            meta = (company_metadata or {}).get(sym, {})
+            l_dt_raw = meta.get("listing_date") or meta.get("Listing_Date") or ""
+            start_year = self.config.history_start_year
+            try:
+                l_dt = pd.to_datetime(l_dt_raw, format="%d-%b-%Y").date()
+                if l_dt.year > start_year:
+                    start_dt = datetime(l_dt.year, l_dt.month, l_dt.day, 0, 0, 0, tzinfo=IST_TZ)
+                else:
+                    start_dt = datetime(start_year, 1, 1, 0, 0, 0, tzinfo=IST_TZ)
+            except Exception:
+                start_dt = datetime(start_year, 1, 1, 0, 0, 0, tzinfo=IST_TZ)
+
+            start_ms = int(start_dt.timestamp() * 1000)
+            candles, status, err, _ = self.client.fetch_candles_single_attempt(sym, start_ms, now_ms)
+            if candles:
+                df, _ = self.store.parse_raw_candles_to_df(candles)
+                if not df.empty:
+                    self.store.merge_and_save(sym, df)
+                    return sym, True, len(df)
+            return sym, False, 0
+
+        if case_b_symbols:
+            logger.info(f"Creating {len(case_b_symbols)} missing company files across 300 workers...")
+            with ThreadPoolExecutor(max_workers=min(self.config.max_workers, len(case_b_symbols))) as ex:
+                futures = [ex.submit(create_new_company_file, s) for s in case_b_symbols]
+                for fut in as_completed(futures):
+                    s, ok, cnt = fut.result()
+                    if ok:
+                        newly_created += 1
+
+        desktop_rep.total_new_files_created = newly_created
+
+        # ----------------------------------------------------
+        # Heal Case A missing gaps in batch ranges
+        # ----------------------------------------------------
+        recovered_cnt = 0
+        unresolved_cnt = 0
+
+        if companies_needing_gap_fill:
+            logger.info(f"Healing missing gaps across {len(companies_needing_gap_fill)} companies...")
+
+            def heal_company_gaps(item):
+                sym, missing_list = item
+                if not missing_list:
+                    return sym, 0, 0
+                d_min = min(missing_list)
+                d_max = max(missing_list)
+                start_ms, end_ms = self.client.build_time_range_ms(d_min, d_max)
+
+                candles, status, err, _ = self.client.fetch_candles_single_attempt(sym, start_ms, end_ms)
+                if not candles:
+                    return sym, 0, len(missing_list)
+
+                df, _ = self.store.parse_raw_candles_to_df(candles)
+                if df.empty:
+                    return sym, 0, len(missing_list)
+
+                missing_set = set(missing_list)
+                df_to_add = df[df["datetime"].dt.date.isin(missing_set)].copy()
+                if df_to_add.empty:
+                    return sym, 0, len(missing_list)
+
+                ins, upd, tot = self.store.merge_and_save(sym, df_to_add)
+                rec = len(df_to_add)
+                unres = len(missing_list) - rec
+                return sym, rec, unres
+
+            with ThreadPoolExecutor(max_workers=min(self.config.max_workers, len(companies_needing_gap_fill))) as ex:
+                heal_results = list(ex.map(heal_company_gaps, companies_needing_gap_fill))
+
+            for _, rec, unres in heal_results:
+                recovered_cnt += rec
+                unresolved_cnt += unres
+
+        verif_rep.total_complete_historical = len(companies_complete) + (len(companies_needing_gap_fill) - sum(1 for _, _, u in heal_results if u > 0) if companies_needing_gap_fill else 0)
+        verif_rep.total_with_missing_candles = len(companies_needing_gap_fill)
+        verif_rep.total_missing_candles_recovered = recovered_cnt
+        verif_rep.total_missing_still_unresolved = unresolved_cnt
+
+        logger.info(
+            f"Verification & synchronization finished in {time.time()-t0:.2f}s: "
+            f"Complete: {verif_rep.total_complete_historical}, Recovered: {recovered_cnt}, "
+            f"New files: {newly_created}."
+        )
+
+        return desktop_rep, verif_rep
