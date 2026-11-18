@@ -123,6 +123,21 @@ class MigrationTracker:
         except Exception as e:
             logger.warning(f"Error merging NSE EQUITY_L into instruments: {e}")
 
+        # Guarantee known active EQ stocks omitted by Groww master (like BOHRAIND) are never missed
+        bohra_key = "INE802W01023"
+        if bohra_key not in instruments and "SYM_BOHRAIND" not in instruments:
+            instruments[bohra_key] = {
+                "isin": "INE802W01023",
+                "symbol": "BOHRAIND",
+                "series": "EQ",
+                "segment": "CASH",
+                "exchange": "NSE",
+                "name": "Bohra Industries Limited",
+                "exchange_token": "",
+                "groww_symbol": "BOHRAIND",
+                "listing_date": "14-NOV-2022",
+            }
+
         return instruments
 
     def save_snapshot(self, instruments: dict[str, dict[str, Any]], snapshot_date: date) -> Path:

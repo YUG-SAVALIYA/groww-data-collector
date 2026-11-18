@@ -138,6 +138,16 @@ class InstrumentSyncService:
                         "Listing_Date": "",
                     }
 
+        # Guarantee known active EQ stocks omitted by Groww master (like BOHRAIND) are never missed
+        if "BOHRAIND" not in records:
+            records["BOHRAIND"] = {
+                "Symbol": "BOHRAIND",
+                "Company_Name": "Bohra Industries Limited",
+                "Series": "EQ",
+                "ISIN": "INE802W01023",
+                "Listing_Date": "14-NOV-2022",
+            }
+
         universe_df = pd.DataFrame(list(records.values()))
         universe_df = universe_df.sort_values("Symbol").reset_index(drop=True)
         return universe_df
