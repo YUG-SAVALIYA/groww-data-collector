@@ -105,7 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Task to execute immediately",
     )
     parser.add_argument(
-        "--daemon",
+        "--daemon", "--deamon",
         action="store_true",
         help="Run continuous background scheduler in Asia/Kolkata time (3:55 PM, 4:00 PM, 6:00 AM, Daily Audit)",
     )
