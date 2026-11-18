@@ -104,22 +104,33 @@ class DailyScheduler:
         logger.info(f"  6:30 AM IST ({self.config.schedule_audit}) -> Historical Completeness Audit")
         logger.info("=" * 70)
 
-        # On fresh device or empty folder, perform immediate bootstrap to download all company data
-        existing_files = list(self.config.data_dir.glob("*_Day.parquet"))
-        if len(existing_files) < 100:
-            logger.info("=" * 70)
-            logger.info(f"  FRESH SETUP DETECTED: {len(existing_files)} company files found in '{self.config.data_dir.name}'.")
-            logger.info("  Automatically triggering initial download for all ~2,404 NSE EQ companies now...")
-            logger.info("=" * 70)
-            try:
-                sync_rep = self.sync_service.synchronize()
-                new_cnt = sync_rep.desktop_report.total_new_files_created if sync_rep and sync_rep.desktop_report else len(list(self.config.data_dir.glob("*_Day.parquet")))
-                logger.info(f"Initial bootstrap complete: {new_cnt} files populated on Desktop.")
-            except Exception as e:
-                logger.error(f"Initial setup sync error: {e}", exc_info=True)
-            logger.info("=" * 70)
-            logger.info("  Initial bootstrap finished. Now entering continuous 24/7 background scheduler...")
-            logger.info("=" * 70)
+        # 1. Startup Verification & Missing Data Auto-Fetch:
+        # Before entering the daily schedule, inspect the folder.
+        # If any company files or trading dates are missing, fetch them immediately!
+        logger.info("=" * 70)
+        logger.info("  STARTUP DATA HEALTH & GAP CHECK")
+        logger.info(f"  Target Storage Folder: '{self.config.data_dir}'")
+        logger.info("  Checking data completeness across all ~2,404 NSE EQ companies...")
+        logger.info("=" * 70)
+        try:
+            sync_rep = self.sync_service.synchronize()
+            if sync_rep and sync_rep.desktop_report:
+                d_rep = sync_rep.desktop_report
+                v_rep = sync_rep.verification_report
+                logger.info("=" * 70)
+                logger.info("  STARTUP VERIFICATION SUMMARY:")
+                logger.info(f"  * Total Files Inspected     : {d_rep.total_files_verified:,}")
+                logger.info(f"  * Already 100% Complete     : {d_rep.total_files_already_complete:,} (Zero bandwidth wasted)")
+                logger.info(f"  * Brand New Files Created   : {d_rep.total_new_files_created:,}")
+                if v_rep:
+                    logger.info(f"  * Missing Candles Restored  : {v_rep.total_missing_candles_recovered:,}")
+                logger.info("=" * 70)
+        except Exception as e:
+            logger.error(f"Startup verification error (non-fatal, continuing to schedule): {e}", exc_info=True)
+
+        logger.info("Startup check complete! Now entering continuous 24/7 background daily routine...")
+        logger.info("Automated Schedule: 3:55 PM (Sync), 4:00 PM (Daily Fetch), 6:00 AM (Final Correction)")
+        logger.info("=" * 70)
 
         while self._running:
             try:
