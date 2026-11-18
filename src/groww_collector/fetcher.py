@@ -38,8 +38,17 @@ class ConcurrencyFetchEngine:
         self.migration_tracker = migration_tracker or MigrationTracker(config)
 
     def load_universe_symbols(self) -> list[str]:
-        """Load target universe of companies from migration tracker eligibility, catalog, or files."""
+        """Load target universe of companies from bundled universe, catalog, or migration tracker."""
         syms = set()
+
+        # 1. Guaranteed baseline: Bundled 2,404 active NSE Series EQ universe
+        if self.config.bundled_universe_path.exists():
+            try:
+                b_df = pd.read_csv(self.config.bundled_universe_path)
+                syms.update(b_df["Symbol"].dropna().astype(str).str.strip().str.upper().unique())
+            except Exception as e:
+                logger.warning(f"Could not read bundled universe: {e}")
+
         try:
             eligible = self.migration_tracker.get_eligible_eq_symbols()
             if eligible:
