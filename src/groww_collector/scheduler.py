@@ -133,6 +133,18 @@ class DailyScheduler:
         except Exception as e:
             logger.error(f"Startup verification error (non-fatal, continuing to schedule): {e}", exc_info=True)
 
+        # 2. Post-Market Check: If started after 4:00 PM on a trading day,
+        # run the daily 4:00 PM fetch immediately so today's candles are captured!
+        now_ist_init = datetime.now(IST_TZ)
+        today_init = now_ist_init.date()
+        if now_ist_init.hour >= 16 and self.calendar.is_trading_day(today_init):
+            logger.info(f"[{now_ist_init.strftime('%H:%M:%S')}] Started after 4:00 PM IST on a trading day ({today_init}). Executing 4:00 PM Daily Candle Fetch immediately...")
+            try:
+                self.run_daily_fetch_task()
+                self._executed_tasks_today.add("daily_fetch")
+            except Exception as e:
+                logger.error(f"Post-market daily fetch error: {e}", exc_info=True)
+
         logger.info("Startup check complete! Now entering continuous 24/7 background daily routine...")
         logger.info("Automated Schedule: 3:55 PM (Sync), 4:00 PM (Daily Fetch - Live Price Close), 6:30 AM (Audit)")
         logger.info("=" * 70)

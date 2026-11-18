@@ -237,21 +237,45 @@ class DataVerificationService:
                 start_ms, end_ms = self.client.build_time_range_ms(d_min, d_max)
 
                 # 4-attempt retry architecture (1 initial + 3 immediate retries)
+                rec = 0
+                unres = len(missing_list)
+                missing_set = set(missing_list)
+
                 for attempt in range(1, self.config.max_attempts + 1):
                     candles, status, err, _ = self.client.fetch_candles_single_attempt(sym, start_ms, end_ms)
                     if candles:
                         df, _ = self.store.parse_raw_candles_to_df(candles)
                         if not df.empty:
-                            missing_set = set(missing_list)
                             df_to_add = df[df["datetime"].dt.date.isin(missing_set)].copy()
                             if not df_to_add.empty:
                                 self.store.merge_and_save(sym, df_to_add)
                                 rec = len(df_to_add)
                                 unres = len(missing_list) - rec
-                                return sym, rec, unres
+                                break
                     if status == 404:
                         break
-                return sym, 0, len(missing_list)
+
+                # If today is among the missing dates and charting service did not return it, heal via Live Quote API!
+                today_d = datetime.now(IST_TZ).date()
+                if today_d in missing_set:
+                    fpath = self.store.get_file_path(sym)
+                    has_today = False
+                    if fpath.exists():
+                        try:
+                            tdf = pd.read_parquet(fpath, columns=["datetime"])
+                            has_today = (tdf["datetime"].dt.date == today_d).any()
+                        except Exception:
+                            pass
+                    if not has_today:
+                        c_live, _, _, _ = self.client.fetch_live_quote_candle(sym, today_d)
+                        if c_live:
+                            df_live, _ = self.store.parse_raw_candles_to_df(c_live)
+                            if not df_live.empty:
+                                self.store.merge_and_save(sym, df_live)
+                                rec += 1
+                                unres = max(0, unres - 1)
+
+                return sym, rec, unres
 
             with ThreadPoolExecutor(max_workers=min(self.config.max_workers, len(companies_needing_gap_fill))) as ex:
                 heal_results = list(ex.map(heal_company_gaps, companies_needing_gap_fill))
