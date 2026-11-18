@@ -46,11 +46,7 @@ groww-data-collector/
 │       ├── reports.py              # Human-readable report compiler & exporters
 │       ├── scheduler.py            # Automated Asia/Kolkata daemon scheduler
 │       └── verification.py         # Case A / Case B folder verification service
-├── tests/
-│   └── test_groww_collector.py     # Unit test suite covering all modules
 ├── groww_collector_service.py      # Root service launcher
-├── run_on_any_device.bat           # 1-click Windows launcher
-├── run_on_any_device.sh            # 1-click Linux/macOS launcher
 ├── requirements.txt                # Python dependencies
 └── README.md
 ```
@@ -136,13 +132,3 @@ Every `{company_name}_Day.parquet` file adheres to this exact schema:
 | `volume` | `int64` | Total session shares traded |
 
 Compression: **Snappy**
-
----
-
-## Testing
-
-Run the full automated test suite:
-
-```bash
-python -m unittest tests/test_groww_collector.py
-```

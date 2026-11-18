@@ -3,19 +3,15 @@
 !/README.md
 !/requirements.txt
 !/groww_collector_service.py
-!/run_on_any_device.bat
-!/run_on_any_device.sh
 
 !/src/
 /src/*
 !/src/groww_collector/
-
-!/tests/
-/tests/*
-!/tests/test_groww_collector.py
 
 __pycache__/
 *.py[cod]
 *.parquet
 *.tmp*
 logs/
+tests/
+*.zip
