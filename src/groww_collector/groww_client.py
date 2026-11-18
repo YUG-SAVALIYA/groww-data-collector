@@ -107,6 +107,62 @@ class GrowwAPIClient:
             return [], 200, "Empty candle data returned", candidates[0]
         return [], last_status, last_error or "Unknown failure", candidates[0]
 
+    def fetch_live_quote_candle(
+        self,
+        symbol: str,
+        target_date: date,
+    ) -> tuple[list[list[Any]], int, str | None, str]:
+        """Fetch today's exact candle from Groww Live Quote API (tr_live_prices).
+        
+        Uses LTP as the true closing price, with accurate live OHLCV.
+        Falls back to charting service if live quote is unavailable.
+        
+        Returns:
+            (candles, http_status, error_message, candidate_used)
+        """
+        session = self.get_session()
+        candidates = self.get_candidate_symbols(symbol)
+        last_error = None
+        last_status = 0
+
+        # Midnight epoch timestamp for target_date in IST
+        target_dt = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=IST_TZ)
+        midnight_ts = int(target_dt.timestamp())
+
+        for candidate in candidates:
+            url = f"https://groww.in/v1/api/stocks_data/v1/tr_live_prices/exchange/NSE/segment/CASH/{candidate}/latest"
+            try:
+                resp = session.get(url, timeout=self.config.request_timeout)
+                last_status = resp.status_code
+                if resp.status_code == 200:
+                    d = resp.json()
+                    o = d.get("open")
+                    h = d.get("high")
+                    l = d.get("low")
+                    c = d.get("ltp")  # Accurate closing trade price
+                    v = int(d.get("volume", 0) or 0)
+                    
+                    if o is not None and c is not None and o > 0 and c > 0:
+                        candle_high = float(h if h is not None and h > 0 else max(o, c))
+                        candle_low = float(l if l is not None and l > 0 else min(o, c))
+                        candle = [[midnight_ts, float(o), candle_high, candle_low, float(c), v]]
+                        return candle, 200, None, candidate
+                elif resp.status_code in (400, 404):
+                    continue
+                else:
+                    last_error = f"HTTP {resp.status_code}"
+            except requests.Timeout:
+                last_error = "Timeout"
+                last_status = 408
+            except Exception as e:
+                last_error = f"Error: {str(e)[:60]}"
+                last_status = 500
+
+        # Fallback to charting service if live API did not return candle
+        start_ms, end_ms = self.build_time_range_ms(target_date, target_date)
+        candles, status, err, sym_used = self.fetch_candles_single_attempt(symbol, start_ms, end_ms)
+        return candles, status, err or last_error, sym_used
+
     def build_time_range_ms(
         self,
         start_date: date,

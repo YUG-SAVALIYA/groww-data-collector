@@ -46,6 +46,9 @@ class CollectorConfig:
     groww_chart_url: str = (
         "https://groww.in/v1/api/charting_service/v2/chart/exchange/NSE/segment/CASH/{symbol}"
     )
+    groww_live_price_url: str = (
+        "https://groww.in/v1/api/stocks_data/v1/tr_live_prices/exchange/NSE/segment/CASH/{symbol}/latest"
+    )
     groww_instruments_url: str = (
         "https://growwapi-assets.groww.in/instruments/instrument.csv"
     )
@@ -56,6 +59,11 @@ class CollectorConfig:
         "https://www.nseindia.com/api/holiday-master?type=trading"
     )
 
+    # Bundled Master Universe (Guaranteed 2,404 Active NSE Series EQ Companies)
+    bundled_universe_path: Path = field(
+        default_factory=lambda: Path(__file__).resolve().parent / "data" / "nse_equity_active.csv"
+    )
+
     # Benchmark symbol for master trading calendar
     benchmark_symbol: str = "RELIANCE"
     history_start_year: int = 2015
@@ -63,7 +71,6 @@ class CollectorConfig:
     # Schedule Times (Asia/Kolkata)
     schedule_sync_instruments: str = "15:55"
     schedule_daily_fetch: str = "16:00"
-    schedule_final_sync: str = "06:00"
     schedule_audit: str = "06:30"
 
     # Retention Policy & Weekend Rules

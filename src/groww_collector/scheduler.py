@@ -63,21 +63,6 @@ class DailyScheduler:
         except Exception as e:
             logger.error(f"4:00 PM Fetch failed: {e}", exc_info=True)
 
-    def run_final_sync_task(self):
-        """6:00 AM IST task (Final correction of previous completed session)."""
-        now_dt = datetime.now(IST_TZ)
-        if self.config.skip_weekends and now_dt.weekday() >= 5:
-            logger.info(f"[{now_dt.strftime('%H:%M:%S')}] 6:00 AM: Skipping final sync (Weekend / Market Closed: {now_dt.strftime('%A')}).")
-            return
-        logger.info(f"[{now_dt.strftime('%H:%M:%S')}] 6:00 AM: Triggering Final Candle Synchronization...")
-        try:
-            prev_session = self.calendar.get_previous_trading_session(now_dt)
-            logger.info(f"Identified previous completed session for 6:00 AM correction: {prev_session}")
-            rep = self.fetch_engine.final_candle_sync_6am(prev_session)
-            logger.info(f"6:00 AM Final Correction Completed. Run ID: {rep.run_id}, Status: {rep.summary.overall_status}")
-        except Exception as e:
-            logger.error(f"6:00 AM Final Sync failed: {e}", exc_info=True)
-
     def run_audit_task(self):
         """Daily completeness audit task."""
         now_dt = datetime.now(IST_TZ)
@@ -99,8 +84,7 @@ class DailyScheduler:
         logger.info("  WEEKEND POLICY: Strict No-Run on Saturday & Sunday")
         logger.info(f"  RETENTION POLICY: Store last {self.config.log_retention_days} days of logs; auto-purge oldest")
         logger.info(f"  3:55 PM IST ({self.config.schedule_sync_instruments}) -> Instrument & Catalog Sync")
-        logger.info(f"  4:00 PM IST ({self.config.schedule_daily_fetch}) -> Daily Candle Fetch")
-        logger.info(f"  6:00 AM IST ({self.config.schedule_final_sync}) -> Previous Session Final Correction")
+        logger.info(f"  4:00 PM IST ({self.config.schedule_daily_fetch}) -> Daily Candle Fetch (Live Price LTP Close)")
         logger.info(f"  6:30 AM IST ({self.config.schedule_audit}) -> Historical Completeness Audit")
         logger.info("=" * 70)
 
@@ -110,7 +94,7 @@ class DailyScheduler:
         logger.info("=" * 70)
         logger.info("  STARTUP DATA HEALTH & GAP CHECK")
         logger.info(f"  Target Storage Folder: '{self.config.data_dir}'")
-        logger.info("  Checking data completeness across all ~2,404 NSE EQ companies...")
+        logger.info("  Checking data completeness across all 2,404 active NSE EQ companies...")
         logger.info("=" * 70)
         try:
             sync_rep = self.sync_service.synchronize()
@@ -125,11 +109,32 @@ class DailyScheduler:
                 if v_rep:
                     logger.info(f"  * Missing Candles Restored  : {v_rep.total_missing_candles_recovered:,}")
                 logger.info("=" * 70)
+
+            # Strict Completion Gate: Ensure 100% of the 2,404 universe files exist on disk
+            u_df = self.sync_service.get_unified_universe()
+            u_syms = set(u_df["Symbol"].str.upper().tolist())
+            existing_files = {f.stem.replace("_Day", "").upper() for f in self.config.data_dir.glob("*_Day.parquet")}
+            missing_files = sorted(list(u_syms - existing_files))
+            if missing_files:
+                logger.warning(f"Strict Completion Gate: {len(missing_files)} company file(s) missing on disk. Healing immediately...")
+                start_year = self.config.history_start_year
+                start_dt = datetime(start_year, 1, 1, 0, 0, 0, tzinfo=IST_TZ)
+                start_ms = int(start_dt.timestamp() * 1000)
+                now_ms = int(datetime.now(IST_TZ).timestamp() * 1000)
+                for sym in missing_files:
+                    for _ in range(self.config.max_attempts):
+                        candles, status, err, _ = self.sync_service.client.fetch_candles_single_attempt(sym, start_ms, now_ms)
+                        if candles:
+                            df, _ = self.sync_service.store.parse_raw_candles_to_df(candles)
+                            if not df.empty:
+                                self.sync_service.store.merge_and_save(sym, df)
+                                logger.info(f"Strict Completion Gate: Successfully restored missing company file {sym}_Day.parquet ({len(df)} candles).")
+                                break
         except Exception as e:
             logger.error(f"Startup verification error (non-fatal, continuing to schedule): {e}", exc_info=True)
 
         logger.info("Startup check complete! Now entering continuous 24/7 background daily routine...")
-        logger.info("Automated Schedule: 3:55 PM (Sync), 4:00 PM (Daily Fetch), 6:00 AM (Final Correction)")
+        logger.info("Automated Schedule: 3:55 PM (Sync), 4:00 PM (Daily Fetch - Live Price Close), 6:30 AM (Audit)")
         logger.info("=" * 70)
 
         while self._running:
@@ -141,13 +146,11 @@ class DailyScheduler:
                 if self._last_date != curr_date:
                     self._executed_tasks_today.clear()
                     self._last_date = curr_date
-                    # Trigger periodic garbage collection and refresh trading calendar
                     gc.collect()
                     try:
                         self.calendar.initialize(force=True)
                     except Exception as cal_err:
                         logger.warning(f"Midnight calendar refresh non-critical error: {cal_err}")
-                    # Enforce strictly 21 days log & report retention (purging oldest files)
                     try:
                         from .cli import cleanup_old_logs_and_reports
                         cleanup_old_logs_and_reports(self.config.logs_dir, max_days=self.config.log_retention_days)
@@ -177,12 +180,7 @@ class DailyScheduler:
                     self._executed_tasks_today.add("daily_fetch")
                     self.run_daily_fetch_task()
 
-                # 3. 6:00 AM: Final sync
-                if curr_time_str == self.config.schedule_final_sync and "final_sync" not in self._executed_tasks_today:
-                    self._executed_tasks_today.add("final_sync")
-                    self.run_final_sync_task()
-
-                # 4. 6:30 AM: Daily completeness audit
+                # 3. 6:30 AM: Daily completeness audit
                 if curr_time_str == self.config.schedule_audit and "audit" not in self._executed_tasks_today:
                     self._executed_tasks_today.add("audit")
                     self.run_audit_task()

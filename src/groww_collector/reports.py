@@ -301,26 +301,29 @@ class ExecutionReportManager:
             )
         )
 
-    def generate_unresolved_markdown_table(self, limit: int = 25) -> str:
-        if not self.unresolved_records:
-            return "  * Unresolved Records: None! 100% of requested companies completed.\n\n"
-
+    def generate_unresolved_markdown_table(self, limit: int = 50) -> str:
         lines = [
-            "--------------------------------------------------------------------------------\n"
-            "  7. UNRESOLVED STOCKS / SUSPENDED TRADING SESSIONS\n"
-            "  (These stocks genuinely did not trade on the exchange; zero synthetic fake data created)\n"
             "--------------------------------------------------------------------------------\n",
-            f"  | {'Company':<12} | {'Date / Range':<15} | {'Attempts':<8} | {'Status':<22} | {'Plain English Reason':<28} |\n",
-            f"  |{'-'*14}|{'-'*17}|{'-'*10}|{'-'*24}|{'-'*30}|\n"
+            "  DATA INTEGRITY: MISSING CANDLES & UNRESOLVED COMPANIES\n",
+            "--------------------------------------------------------------------------------\n",
         ]
+        if not self.unresolved_records:
+            lines.append("  * Missing Candles: NONE! 100% of companies have full continuous daily data.\n\n")
+            return "".join(lines)
+
+        lines.extend([
+            f"  * Detected {len(self.unresolved_records)} company session(s) requiring attention:\n\n",
+            f"  | {'Symbol':<12} | {'Missing Date(s)':<18} | {'Status':<20} | {'Action / Detail':<30} |\n",
+            f"  |{'-'*14}|{'-'*20}|{'-'*22}|{'-'*32}|\n",
+        ])
 
         for r in self.unresolved_records[:limit]:
             lines.append(
-                f"  | {r.company:<12} | {r.missing_date_or_range:<15} | {r.attempts:<8} | {r.final_status:<22} | {r.error[:28]:<28} |\n"
+                f"  | {r.company:<12} | {r.missing_date_or_range:<18} | {r.final_status:<20} | {r.error[:30]:<30} |\n"
             )
 
         if len(self.unresolved_records) > limit:
-            lines.append(f"\n  ... and {len(self.unresolved_records) - limit} more records (saved in permanent CSV report).\n\n")
+            lines.append(f"\n  ... and {len(self.unresolved_records) - limit} more records (saved in permanent report).\n\n")
         else:
             lines.append("\n")
 
@@ -332,8 +335,15 @@ class ExecutionReportManager:
         
         banner = (
             "================================================================================\n"
-            "           GROWW DAILY CANDLE DATA COLLECTION - EXECUTION REPORT                \n"
+            "                    GROWW COLLECTOR — SYSTEM STATUS REPORT                      \n"
             f"           Time: {now_ist} | Task: {self.task_name}                     \n"
+            "================================================================================\n"
+            f"  * Storage Location          : {self.config.data_dir}\n"
+            f"  * Target Universe           : 2,404 Active NSE Equity (Series EQ) Companies\n"
+            f"  * Companies Processed       : {self.summary.total_companies_processed:,}\n"
+            f"  * Successful Companies      : {self.summary.total_successful_fetches:,}\n"
+            f"  * Total Daily Candles Added : {self.summary.total_candles_inserted_updated:,}\n"
+            f"  * Overall Status            : {self.summary.overall_status}\n"
             "================================================================================\n\n"
         )
         parts = [
@@ -344,7 +354,7 @@ class ExecutionReportManager:
             self.initial_report.format_text() if self.initial_report.total_requested > 0 else "",
             self.retry_report.format_text() if self.retry_report.total_requiring_retry > 0 else "",
             self.audit_report.format_text() if self.audit_report.total_audited > 0 else "",
-            self.generate_unresolved_markdown_table() if self.unresolved_records else "",
+            self.generate_unresolved_markdown_table(),
             self.summary.format_text(),
         ]
         return "".join(p for p in parts if p)

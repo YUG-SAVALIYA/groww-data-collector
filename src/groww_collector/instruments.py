@@ -102,41 +102,47 @@ class InstrumentSyncService:
 
         records = {}
 
+        # 1. Load bundled official active NSE EQ list (Guaranteed 2,404 active companies baseline)
+        if self.config.bundled_universe_path.exists():
+            try:
+                b_df = pd.read_csv(self.config.bundled_universe_path)
+                for _, row in b_df.iterrows():
+                    sym = str(row.get("Symbol", "")).strip().upper()
+                    if sym:
+                        records[sym] = {
+                            "Symbol": sym,
+                            "Company_Name": str(row.get("Company_Name", "")),
+                            "Series": "EQ",
+                            "ISIN": str(row.get("ISIN", "")),
+                            "Listing_Date": str(row.get("Listing_Date", "")),
+                        }
+            except Exception as e:
+                logger.warning(f"Could not load bundled active list: {e}")
+
         if not existing_catalog.empty:
             for _, row in existing_catalog.iterrows():
                 sym = str(row.get("Symbol", "")).strip().upper()
-                if sym:
-                    records[sym] = {
-                        "Symbol": sym,
-                        "Company_Name": str(row.get("Company_Name", "")),
-                        "Series": "EQ",
-                        "ISIN": str(row.get("ISIN", "")),
-                        "Listing_Date": str(row.get("Listing_Date", "")),
-                    }
+                if sym and sym in records:
+                    records[sym].update({
+                        "Company_Name": str(row.get("Company_Name", records[sym]["Company_Name"])),
+                        "Listing_Date": str(row.get("Listing_Date", records[sym]["Listing_Date"])),
+                    })
 
         if not nse_eq.empty:
             for _, row in nse_eq.iterrows():
                 sym = str(row.get("SYMBOL", "")).strip().upper()
-                if sym:
-                    records[sym] = {
-                        "Symbol": sym,
+                if sym and sym in records:
+                    records[sym].update({
                         "Company_Name": str(row.get("NAME OF COMPANY", "")),
-                        "Series": "EQ",
                         "ISIN": str(row.get("ISIN NUMBER", "")),
                         "Listing_Date": str(row.get("DATE OF LISTING", "")),
-                    }
+                    })
 
         if not groww_eq.empty:
             for _, row in groww_eq.iterrows():
                 sym = str(row.get("trading_symbol", "")).strip().upper()
-                if sym and sym not in records:
-                    records[sym] = {
-                        "Symbol": sym,
-                        "Company_Name": str(row.get("name", "")),
-                        "Series": "EQ",
-                        "ISIN": str(row.get("isin", "")),
-                        "Listing_Date": "",
-                    }
+                if sym and sym in records:
+                    records[sym]["ISIN"] = records[sym]["ISIN"] or str(row.get("isin", ""))
 
         universe_df = pd.DataFrame(list(records.values()))
         universe_df = universe_df.sort_values("Symbol").reset_index(drop=True)

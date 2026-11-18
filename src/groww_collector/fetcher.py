@@ -246,13 +246,10 @@ class ConcurrencyFetchEngine:
         rep_mgr.initial_report.total_universe = len(symbols)
         logger.info(f"[{run_id}] Executing 4:00 PM Daily Candle Fetch for date {target_date} across {len(symbols)} companies...")
 
-        # Time range: start from 7 days before target_date to target_date
-        # Groww returns recent window reliably
-        start_date = target_date - pd.Timedelta(days=7)
-        start_ms, end_ms = self.client.build_time_range_ms(start_date, target_date)
-
         def worker_task(sym: str, attempt: int, r_id: str):
-            candles, status, err, _ = self.client.fetch_candles_single_attempt(sym, start_ms, end_ms)
+            # Fetch using Groww Live Quote API (tr_live_prices) to get the accurate closing LTP price!
+            # Falls back seamlessly to charting service if live quote is unavailable.
+            candles, status, err, sym_used = self.client.fetch_live_quote_candle(sym, target_date)
             if not candles:
                 return False, 0, 0, 0, err or "Empty candle response"
             
@@ -260,18 +257,8 @@ class ConcurrencyFetchEngine:
             if df.empty:
                 return False, 0, 0, 0, "No valid candles after OHLCV validation"
 
-            # Filter for target_date if present, or take latest candle if <= target_date
-            df_filtered = df[df["datetime"].dt.date == target_date]
-            if df_filtered.empty:
-                # If target_date not explicitly returned, check if latest candle is valid
-                latest_d = df["datetime"].iloc[-1].date()
-                if latest_d == target_date:
-                    df_filtered = df.iloc[-1:].copy()
-                else:
-                    return False, 0, 0, 0, f"Candle for {target_date} not yet available (latest: {latest_d})"
-
-            ins_cnt, upd_cnt, tot = self.store.merge_and_save(sym, df_filtered)
-            return True, len(df_filtered), ins_cnt, upd_cnt, None
+            ins_cnt, upd_cnt, tot = self.store.merge_and_save(sym, df)
+            return True, len(df), ins_cnt, upd_cnt, None
 
         self.execute_with_immediate_retries(
             items=symbols,
