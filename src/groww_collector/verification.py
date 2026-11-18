@@ -185,22 +185,37 @@ class DataVerificationService:
             start_year = self.config.history_start_year
             start_dt = datetime(start_year, 1, 1, 0, 0, 0, tzinfo=IST_TZ)
             start_ms = int(start_dt.timestamp() * 1000)
-            candles, status, err, _ = self.client.fetch_candles_single_attempt(sym, start_ms, now_ms)
-            if candles:
-                df, _ = self.store.parse_raw_candles_to_df(candles)
-                if not df.empty:
-                    self.store.merge_and_save(sym, df)
-                    return sym, True, len(df)
+
+            # 4-attempt retry architecture (1 initial + 3 immediate retries)
+            for attempt in range(1, self.config.max_attempts + 1):
+                candles, status, err, _ = self.client.fetch_candles_single_attempt(sym, start_ms, now_ms)
+                if candles:
+                    df, _ = self.store.parse_raw_candles_to_df(candles)
+                    if not df.empty:
+                        self.store.merge_and_save(sym, df)
+                        return sym, True, len(df)
+                if status == 404:
+                    break
             return sym, False, 0
 
         if case_b_symbols:
-            logger.info(f"Creating {len(case_b_symbols)} missing company files across 300 workers...")
-            with ThreadPoolExecutor(max_workers=min(self.config.max_workers, len(case_b_symbols))) as ex:
-                futures = [ex.submit(create_new_company_file, s) for s in case_b_symbols]
-                for fut in as_completed(futures):
-                    s, ok, cnt = fut.result()
-                    if ok:
-                        newly_created += 1
+            logger.info(f"Creating {len(case_b_symbols)} missing company files across {self.config.max_workers} workers...")
+            pending = list(case_b_symbols)
+            for wave in range(1, 3):
+                if not pending:
+                    break
+                failed_in_wave = []
+                with ThreadPoolExecutor(max_workers=min(self.config.max_workers, len(pending))) as ex:
+                    futures = {ex.submit(create_new_company_file, s): s for s in pending}
+                    for fut in as_completed(futures):
+                        s, ok, cnt = fut.result()
+                        if ok:
+                            newly_created += 1
+                        else:
+                            failed_in_wave.append(s)
+                pending = failed_in_wave
+                if pending:
+                    logger.warning(f"Wave {wave}: {len(pending)} companies need retry. Retrying...")
 
         desktop_rep.total_new_files_created = newly_created
 
@@ -221,23 +236,22 @@ class DataVerificationService:
                 d_max = max(missing_list)
                 start_ms, end_ms = self.client.build_time_range_ms(d_min, d_max)
 
-                candles, status, err, _ = self.client.fetch_candles_single_attempt(sym, start_ms, end_ms)
-                if not candles:
-                    return sym, 0, len(missing_list)
-
-                df, _ = self.store.parse_raw_candles_to_df(candles)
-                if df.empty:
-                    return sym, 0, len(missing_list)
-
-                missing_set = set(missing_list)
-                df_to_add = df[df["datetime"].dt.date.isin(missing_set)].copy()
-                if df_to_add.empty:
-                    return sym, 0, len(missing_list)
-
-                ins, upd, tot = self.store.merge_and_save(sym, df_to_add)
-                rec = len(df_to_add)
-                unres = len(missing_list) - rec
-                return sym, rec, unres
+                # 4-attempt retry architecture (1 initial + 3 immediate retries)
+                for attempt in range(1, self.config.max_attempts + 1):
+                    candles, status, err, _ = self.client.fetch_candles_single_attempt(sym, start_ms, end_ms)
+                    if candles:
+                        df, _ = self.store.parse_raw_candles_to_df(candles)
+                        if not df.empty:
+                            missing_set = set(missing_list)
+                            df_to_add = df[df["datetime"].dt.date.isin(missing_set)].copy()
+                            if not df_to_add.empty:
+                                self.store.merge_and_save(sym, df_to_add)
+                                rec = len(df_to_add)
+                                unres = len(missing_list) - rec
+                                return sym, rec, unres
+                    if status == 404:
+                        break
+                return sym, 0, len(missing_list)
 
             with ThreadPoolExecutor(max_workers=min(self.config.max_workers, len(companies_needing_gap_fill))) as ex:
                 heal_results = list(ex.map(heal_company_gaps, companies_needing_gap_fill))
