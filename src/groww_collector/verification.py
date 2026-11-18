@@ -102,7 +102,8 @@ class DataVerificationService:
                     except Exception:
                         pass
 
-            exp_start = max(l_dt, min_start_date) if l_dt else min_start_date
+            # Always check from 2015 so migrated/re-listed stocks (like NESTLEIND, UEL) recover full Groww history
+            exp_start = min_start_date
             expected_dates = set(self.calendar.get_expected_trading_sessions(exp_start, latest_session))
 
             dates_present = set()
@@ -179,18 +180,10 @@ class DataVerificationService:
         now_ms = int(datetime.now(IST_TZ).timestamp() * 1000)
 
         def create_new_company_file(sym: str):
-            meta = (company_metadata or {}).get(sym, {})
-            l_dt_raw = meta.get("listing_date") or meta.get("Listing_Date") or ""
+            # Fetch complete available history from 2015 to today
+            # (Ensures re-listed and migrated companies like NESTLEIND, UEL recover all historical candles)
             start_year = self.config.history_start_year
-            try:
-                l_dt = pd.to_datetime(l_dt_raw, format="%d-%b-%Y").date()
-                if l_dt.year > start_year:
-                    start_dt = datetime(l_dt.year, l_dt.month, l_dt.day, 0, 0, 0, tzinfo=IST_TZ)
-                else:
-                    start_dt = datetime(start_year, 1, 1, 0, 0, 0, tzinfo=IST_TZ)
-            except Exception:
-                start_dt = datetime(start_year, 1, 1, 0, 0, 0, tzinfo=IST_TZ)
-
+            start_dt = datetime(start_year, 1, 1, 0, 0, 0, tzinfo=IST_TZ)
             start_ms = int(start_dt.timestamp() * 1000)
             candles, status, err, _ = self.client.fetch_candles_single_attempt(sym, start_ms, now_ms)
             if candles:

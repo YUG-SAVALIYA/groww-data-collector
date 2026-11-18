@@ -87,7 +87,7 @@ class HistoricalAuditService:
                 except Exception:
                     pass
 
-            exp_start = max(listing_date, min_calendar_date) if listing_date else min_calendar_date
+            exp_start = min_calendar_date
             expected_sessions = set(self.calendar.get_expected_trading_sessions(exp_start, latest_session))
 
             # Read existing parquet
