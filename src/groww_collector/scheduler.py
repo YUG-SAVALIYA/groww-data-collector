@@ -104,6 +104,23 @@ class DailyScheduler:
         logger.info(f"  6:30 AM IST ({self.config.schedule_audit}) -> Historical Completeness Audit")
         logger.info("=" * 70)
 
+        # On fresh device or empty folder, perform immediate bootstrap to download all company data
+        existing_files = list(self.config.data_dir.glob("*_Day.parquet"))
+        if len(existing_files) < 100:
+            logger.info("=" * 70)
+            logger.info(f"  FRESH SETUP DETECTED: {len(existing_files)} company files found in '{self.config.data_dir.name}'.")
+            logger.info("  Automatically triggering initial download for all ~2,404 NSE EQ companies now...")
+            logger.info("=" * 70)
+            try:
+                sync_rep = self.sync_service.synchronize()
+                new_cnt = sync_rep.desktop_report.total_new_files_created if sync_rep and sync_rep.desktop_report else len(list(self.config.data_dir.glob("*_Day.parquet")))
+                logger.info(f"Initial bootstrap complete: {new_cnt} files populated on Desktop.")
+            except Exception as e:
+                logger.error(f"Initial setup sync error: {e}", exc_info=True)
+            logger.info("=" * 70)
+            logger.info("  Initial bootstrap finished. Now entering continuous 24/7 background scheduler...")
+            logger.info("=" * 70)
+
         while self._running:
             try:
                 now_ist = datetime.now(IST_TZ)
