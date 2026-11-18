@@ -94,6 +94,35 @@ class MigrationTracker:
                 "listing_date": l_dt,
             }
 
+        # Union with official NSE EQUITY_L to include any stocks omitted from Groww master (e.g. BOHRAIND)
+        try:
+            if 'eq_l' in locals() and not eq_l.empty:
+                for _, row in eq_l.iterrows():
+                    s_series = str(row.get("SERIES", "")).strip().upper()
+                    if s_series != "EQ":
+                        continue
+                    s_sym = str(row.get("SYMBOL", "")).strip().upper()
+                    s_isin = str(row.get("ISIN NUMBER", "")).strip()
+                    s_name = str(row.get("NAME OF COMPANY", "")).strip()
+                    s_ldt = str(row.get("DATE OF LISTING", "")).strip()
+                    if not s_sym:
+                        continue
+                    pkey = s_isin if s_isin and s_isin.startswith("INE") else f"SYM_{s_sym}"
+                    if pkey not in instruments:
+                        instruments[pkey] = {
+                            "isin": s_isin,
+                            "symbol": s_sym,
+                            "series": "EQ",
+                            "segment": "CASH",
+                            "exchange": "NSE",
+                            "name": s_name,
+                            "exchange_token": "",
+                            "groww_symbol": s_sym,
+                            "listing_date": s_ldt,
+                        }
+        except Exception as e:
+            logger.warning(f"Error merging NSE EQUITY_L into instruments: {e}")
+
         return instruments
 
     def save_snapshot(self, instruments: dict[str, dict[str, Any]], snapshot_date: date) -> Path:

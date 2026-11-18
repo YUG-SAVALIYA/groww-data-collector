@@ -204,13 +204,11 @@ class InstrumentSyncService:
         # ----------------------------------------------------
         # Step 2: Determine currently eligible NSE EQ universe
         # ----------------------------------------------------
-        eligible_syms = self.migration_tracker.get_eligible_eq_symbols()
-        if not eligible_syms:
-            # Fallback if first run or empty
-            universe_df = self.get_unified_universe()
-            eligible_syms = sorted(list(universe_df["Symbol"].str.upper().unique()))
-        else:
-            universe_df = self.get_unified_universe()
+        universe_df = self.get_unified_universe()
+        eligible_set = set(self.migration_tracker.get_eligible_eq_symbols())
+        if not universe_df.empty:
+            eligible_set.update(universe_df["Symbol"].str.upper().unique())
+        eligible_syms = sorted(list(eligible_set))
 
         metadata_dict = {
             row["Symbol"]: row.to_dict()

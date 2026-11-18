@@ -39,30 +39,28 @@ class ConcurrencyFetchEngine:
 
     def load_universe_symbols(self) -> list[str]:
         """Load target universe of companies from migration tracker eligibility, catalog, or files."""
-        # 1. First priority: active EQ membership from migration tracker
+        syms = set()
         try:
             eligible = self.migration_tracker.get_eligible_eq_symbols()
             if eligible:
-                return eligible
+                syms.update(eligible)
         except Exception as e:
             logger.debug(f"Could not load eligible symbols from migration tracker: {e}")
 
-        # 2. Second priority: catalog file
         if self.config.catalog_path.exists():
             try:
                 cat = pd.read_csv(self.config.catalog_path)
-                syms = sorted(list(cat["Symbol"].dropna().astype(str).str.strip().str.upper().unique()))
-                if syms:
-                    return syms
+                cat_syms = cat["Symbol"].dropna().astype(str).str.strip().str.upper().unique()
+                syms.update(cat_syms)
             except Exception as e:
                 logger.warning(f"Could not read catalog: {e}")
 
-        # 3. Fallback: existing files in data_dir
-        syms = sorted([
-            f.name.replace("_Day.parquet", "").strip().upper()
-            for f in self.config.data_dir.glob("*_Day.parquet")
-        ])
-        return syms
+        if not syms:
+            syms.update([
+                f.name.replace("_Day.parquet", "").strip().upper()
+                for f in self.config.data_dir.glob("*_Day.parquet")
+            ])
+        return sorted(list(syms))
 
     def execute_with_immediate_retries(
         self,
