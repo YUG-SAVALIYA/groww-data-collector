@@ -32,6 +32,16 @@ class CandleChangeRecord:
     volume: int = 0
 
 @dataclass
+class CorporateActionRecord:
+    """Record of a stock split / consolidation / major corporate action (>20% price shift)."""
+    symbol: str
+    target_date: str
+    prev_close: float
+    today_open: float
+    shift_pct: float
+    candles_restored: int
+
+@dataclass
 class FetchAttemptRecord:
     """Individual attempt record for a company fetch."""
     run_id: str
@@ -180,22 +190,38 @@ class InitialFetchReport:
     total_candles_received: int = 0
     total_new_inserted: int = 0
     total_existing_updated: int = 0
+    total_splits_detected: int = 0
     added_records: list[CandleChangeRecord] = field(default_factory=list)
     updated_records: list[CandleChangeRecord] = field(default_factory=list)
+    split_records: list[CorporateActionRecord] = field(default_factory=list)
 
     def format_text(self) -> str:
         pct = (self.successful / self.total_requested * 100) if self.total_requested else 0.0
         lines = [
             "--------------------------------------------------------------------------------\n",
-            "  DAILY CANDLE COLLECTION: ADDED & UPDATED CANDLES\n",
+            "  DAILY CANDLE COLLECTION: ADDED, UPDATED & SPLIT CANDLES\n",
             "--------------------------------------------------------------------------------\n",
             f"  * Total Companies Requested : {self.total_requested:,} companies\n",
             f"  * Succeeded on First Attempt: {self.successful:,} companies ({pct:.2f}% first-try success!)\n",
             f"  * Temporary API Glitches    : {self.api_network_errors:,} companies (rescued by immediate retry)\n",
             f"  * Total Candles Downloaded  : {self.total_candles_received:,} daily candles\n",
             f"  * Newly Added Candles       : {self.total_new_inserted:,} candles added\n",
-            f"  * Revised / Updated Candles : {self.total_existing_updated:,} candles revised with official live figures\n\n",
+            f"  * Revised / Updated Candles : {self.total_existing_updated:,} candles revised with official live figures\n",
         ]
+        if self.total_splits_detected > 0:
+            lines.append(f"  * Corporate Actions / Splits: {self.total_splits_detected:,} companies detected (>20% price shift) and 2015-today history adjusted\n")
+        lines.append("\n")
+
+        if self.split_records:
+            lines.append(f"  [CORPORATE ACTIONS & SPLITS DETECTED (>20% SHIFT) - {len(self.split_records)} COMPANIES]\n")
+            lines.append("  * Automatic Full History Re-Download (2015-Today) executed to adjust all historical candles.\n")
+            lines.append(f"  | {'Symbol':<12} | {'Date':<12} | {'Prev Close':<12} | {'Today Open':<12} | {'Price Shift':<14} | {'Candles Restored':<18} |\n")
+            lines.append(f"  |{'-'*14}|{'-'*14}|{'-'*14}|{'-'*14}|{'-'*16}|{'-'*20}|\n")
+            for sr in self.split_records:
+                shift_str = f"{sr.shift_pct * 100:+.2f}%"
+                rst_str = f"{sr.candles_restored:,}"
+                lines.append(f"  | {sr.symbol:<12} | {sr.target_date:<12} | {sr.prev_close:<12.2f} | {sr.today_open:<12.2f} | {shift_str:<14} | {rst_str:<18} |\n")
+            lines.append("\n")
 
         if self.added_records:
             lines.append(f"  [NEWLY ADDED CANDLES - {len(self.added_records)} COMPANIES]\n")
@@ -358,6 +384,27 @@ class ExecutionReportManager:
                 self.initial_report.added_records.append(rec)
             elif change_type == "UPDATED":
                 self.initial_report.updated_records.append(rec)
+
+    def record_split_detected(
+        self,
+        symbol: str,
+        target_date: str,
+        prev_close: float,
+        today_open: float,
+        shift_pct: float,
+        candles_restored: int,
+    ):
+        rec = CorporateActionRecord(
+            symbol=symbol,
+            target_date=target_date,
+            prev_close=prev_close,
+            today_open=today_open,
+            shift_pct=shift_pct,
+            candles_restored=candles_restored,
+        )
+        with self._records_lock:
+            self.initial_report.split_records.append(rec)
+            self.initial_report.total_splits_detected += 1
 
     def log_attempt(self, attempt: FetchAttemptRecord):
         self.all_attempts.append(attempt)

@@ -105,6 +105,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Task to execute immediately",
     )
     parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Run complete 10-year historical audit & gap healing (2015-today) across all 2,404 companies, followed by today's live daily fetch with split auto-detection",
+    )
+    parser.add_argument(
         "--daemon", "--deamon",
         action="store_true",
         help="Run continuous background scheduler in Asia/Kolkata time (3:55 PM, 4:00 PM, 6:00 AM, Daily Audit)",
@@ -205,13 +210,20 @@ def main(argv=None):
             logger.error(f"Invalid date format: {args.date}. Expected YYYY-MM-DD.")
             sys.exit(1)
 
-    # Default behavior if neither --task nor --daemon is provided
-    if not args.task and not args.daemon:
-        logger.info("No specific --task provided. Starting continuous background collection daemon.")
-        logger.info("Daily schedule: 3:55 PM (Sync), 4:00 PM (Fetch), 6:00 AM (Final Correction).")
-        logger.info("Tip: Run with -h or --help to see manual single-task options (e.g. --task verify_existing).")
-        args.daemon = True
+    # 1. Mode: --all (Full 10-year historical check + Today's live fetch)
+    if args.all:
+        logger.info("=" * 80)
+        logger.info("   MODE: --all (FULL 10-YEAR HISTORICAL AUDIT + TODAY'S LIVE FETCH)")
+        logger.info("   Phase 1: Full 10-Year Historical Verification & Gap Healing (2015 - Today)")
+        logger.info("   Phase 2: Today's Live Daily Candle Collection (LTP Close & Split Auto-Detection)")
+        logger.info("=" * 80)
+        sync_rep = sync_service.synchronize()
+        print("\n" + sync_rep.compile_full_text_report())
+        fetch_rep = fetch_engine.fetch_daily_candles_4pm(target_date)
+        print("\n" + fetch_rep.compile_full_text_report())
+        return
 
+    # 2. Mode: Continuous Background Daemon
     if args.daemon:
         scheduler = DailyScheduler(
             config=config,
@@ -227,70 +239,76 @@ def main(argv=None):
             logger.info("Daemon interrupted by user.")
         return
 
-    if args.task in ("sync_instruments", "verify_existing"):
-        rep_mgr = sync_service.synchronize()
-        print("\n" + rep_mgr.compile_full_text_report())
+    # 3. Mode: Specific Manual Task
+    if args.task:
+        if args.task in ("sync_instruments", "verify_existing"):
+            rep_mgr = sync_service.synchronize()
+            print("\n" + rep_mgr.compile_full_text_report())
 
-    elif args.task == "detect_migrations":
-        mig_data = migration_tracker.detect_migrations(target_date)
-        from .reports import NSEEQMigrationReport
-        mig_rep = NSEEQMigrationReport(
-            comparison_date=mig_data["comparison_date"],
-            current_date=mig_data["current_date"],
-            is_baseline=mig_data["is_baseline"],
-            migrations=mig_data["migrations"],
-            total_moved_out_of_eq=mig_data["summary"]["moved_out_of_eq"],
-            total_entered_eq=mig_data["summary"]["entered_eq"],
-            total_newly_listed=mig_data["summary"]["newly_listed"],
-            total_migrated_into_eq=mig_data["summary"]["migrated_into_eq"],
-            total_removed_from_master=mig_data["summary"]["removed_from_master"],
-            total_unverified_status=mig_data["summary"]["unverified_status"],
-        )
-        print("\n" + mig_rep.format_text())
+        elif args.task == "detect_migrations":
+            mig_data = migration_tracker.detect_migrations(target_date)
+            from .reports import NSEEQMigrationReport
+            mig_rep = NSEEQMigrationReport(
+                comparison_date=mig_data["comparison_date"],
+                current_date=mig_data["current_date"],
+                is_baseline=mig_data["is_baseline"],
+                migrations=mig_data["migrations"],
+                total_moved_out_of_eq=mig_data["summary"]["moved_out_of_eq"],
+                total_entered_eq=mig_data["summary"]["entered_eq"],
+                total_newly_listed=mig_data["summary"]["newly_listed"],
+                total_migrated_into_eq=mig_data["summary"]["migrated_into_eq"],
+                total_removed_from_master=mig_data["summary"]["removed_from_master"],
+                total_unverified_status=mig_data["summary"]["unverified_status"],
+            )
+            print("\n" + mig_rep.format_text())
 
-    elif args.task == "daily_fetch":
-        rep = fetch_engine.fetch_daily_candles_4pm(target_date)
-        print("\n" + rep.compile_full_text_report())
+        elif args.task == "daily_fetch":
+            rep = fetch_engine.fetch_daily_candles_4pm(target_date)
+            print("\n" + rep.compile_full_text_report())
 
-    elif args.task == "final_sync":
-        rep = fetch_engine.final_candle_sync_6am(target_date)
-        print("\n" + rep.compile_full_text_report())
+        elif args.task == "final_sync":
+            rep = fetch_engine.final_candle_sync_6am(target_date)
+            print("\n" + rep.compile_full_text_report())
 
-    elif args.task == "audit":
-        rep = audit_service.run_completeness_audit(attempt_gap_recovery=True)
-        print("\n" + rep.compile_full_text_report())
+        elif args.task == "audit":
+            rep = audit_service.run_completeness_audit(attempt_gap_recovery=True)
+            print("\n" + rep.compile_full_text_report())
 
-    elif args.task == "benchmark":
-        print("\n=== RUNNING BENCHMARK ACROSS FULL NSE EQ UNIVERSE (300 WORKERS) ===")
-        import time
-        t0 = time.time()
-        test_session = calendar.get_previous_trading_session()
-        print(f"Testing full universe fetch for completed session: {test_session}...")
-        rep = fetch_engine.final_candle_sync_6am(test_session)
-        elapsed = time.time() - t0
-        print("\n" + rep.compile_full_text_report())
-        print(f"\n>>> BENCHMARK RESULT: Completed in {elapsed:.2f} seconds ({elapsed/60:.2f} minutes).")
-        if elapsed <= 300.0:
-            print(">>> PERFORMANCE TARGET ACHIEVED: Well under 5-minute requirement!")
-        else:
-            print(">>> PERFORMANCE WARNING: Exceeded 5-minute target.")
+        elif args.task == "benchmark":
+            print("\n=== RUNNING BENCHMARK ACROSS FULL NSE EQ UNIVERSE (300 WORKERS) ===")
+            import time
+            t0 = time.time()
+            test_session = calendar.get_previous_trading_session()
+            print(f"Testing full universe fetch for completed session: {test_session}...")
+            rep = fetch_engine.final_candle_sync_6am(test_session)
+            elapsed = time.time() - t0
+            print("\n" + rep.compile_full_text_report())
+            print(f"\n>>> BENCHMARK RESULT: Completed in {elapsed:.2f} seconds ({elapsed/60:.2f} minutes).")
+            if elapsed <= 300.0:
+                print(">>> PERFORMANCE TARGET ACHIEVED: Well under 5-minute requirement!")
+            else:
+                print(">>> PERFORMANCE WARNING: Exceeded 5-minute target.")
 
-    elif args.task == "run_all":
-        print("\n--- EXECUTING COMPLETE PIPELINE (ALL TASKS) ---")
-        # 1. Sync instruments & migrations & verify
-        sync_rep = sync_service.synchronize()
-        print(f"1. Instrument Sync & Verification Finished.")
+        elif args.task == "run_all":
+            print("\n--- EXECUTING COMPLETE PIPELINE (ALL TASKS) ---")
+            sync_rep = sync_service.synchronize()
+            print(f"1. Instrument Sync & Verification Finished.")
+            final_rep = fetch_engine.final_candle_sync_6am(target_date)
+            print("\n" + final_rep.compile_full_text_report())
+            audit_rep = audit_service.run_completeness_audit(attempt_gap_recovery=True)
+            print("\n" + audit_rep.compile_full_text_report())
+        return
 
-        # 2. Final sync / correction
-        final_rep = fetch_engine.final_candle_sync_6am(target_date)
-        print("\n" + final_rep.compile_full_text_report())
-
-        # 3. Completeness audit & gap recovery
-        audit_rep = audit_service.run_completeness_audit(attempt_gap_recovery=True)
-        print("\n" + audit_rep.compile_full_text_report())
-
-    else:
-        parser.print_help()
+    # 4. Mode: Default On-Demand Execution (Fast Daily Fetch with Split Auto-Detection)
+    logger.info("=" * 80)
+    logger.info("   MODE: FAST DAILY FETCH (Default On-Demand Execution)")
+    logger.info("   Target Date: %s", target_date or datetime.now(IST_TZ).date())
+    logger.info("   Fetching official live daily candles with corporate action / split auto-detection (>20% shift)...")
+    logger.info("   Tip: Use '--all' to check/heal all 10-year historical data from 2015.")
+    logger.info("   Tip: Use '--daemon' to run as continuous 24/7 background scheduler.")
+    logger.info("=" * 80)
+    rep = fetch_engine.fetch_daily_candles_4pm(target_date)
+    print("\n" + rep.compile_full_text_report())
 
 if __name__ == "__main__":
     main()

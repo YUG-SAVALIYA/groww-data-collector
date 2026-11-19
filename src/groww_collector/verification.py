@@ -178,24 +178,45 @@ class DataVerificationService:
         # ----------------------------------------------------
         newly_created = 0
         now_ms = int(datetime.now(IST_TZ).timestamp() * 1000)
+        today_d = datetime.now(IST_TZ).date()
+        yesterday_dt = datetime(today_d.year, today_d.month, today_d.day, 0, 0, 0, tzinfo=IST_TZ)
+        yesterday_ms = int(yesterday_dt.timestamp() * 1000)
 
         def create_new_company_file(sym: str):
-            # Fetch complete available history from 2015 to today
-            # (Ensures re-listed and migrated companies like NESTLEIND, UEL recover all historical candles)
+            # Fetch complete available history from 2015 to yesterday via Charting Service
             start_year = self.config.history_start_year
             start_dt = datetime(start_year, 1, 1, 0, 0, 0, tzinfo=IST_TZ)
             start_ms = int(start_dt.timestamp() * 1000)
 
-            # 4-attempt retry architecture (1 initial + 3 immediate retries)
+            # 1. Historical candles strictly up to yesterday using Charting Service
             for attempt in range(1, self.config.max_attempts + 1):
-                candles, status, err, _ = self.client.fetch_candles_single_attempt(sym, start_ms, now_ms)
+                candles, status, err, _ = self.client.fetch_candles_single_attempt(sym, start_ms, yesterday_ms)
                 if candles:
                     df, _ = self.store.parse_raw_candles_to_df(candles)
                     if not df.empty:
-                        self.store.merge_and_save(sym, df)
-                        return sym, True, len(df)
+                        # Exclude any today candle from charting service
+                        df_hist = df[df["datetime"].dt.date < today_d].copy()
+                        if not df_hist.empty:
+                            self.store.merge_and_save(sym, df_hist)
+                        break
                 if status == 404:
                     break
+
+            # 2. For today's candle, strictly use Live Quote API (tr_live_prices)
+            if self.calendar.is_trading_day(today_d):
+                c_live, _, _, _ = self.client.fetch_live_quote_candle(sym, today_d)
+                if c_live:
+                    df_live, _ = self.store.parse_raw_candles_to_df(c_live)
+                    if not df_live.empty:
+                        self.store.merge_and_save(sym, df_live)
+
+            fpath = self.store.get_file_path(sym)
+            if fpath.exists():
+                try:
+                    cnt = len(pd.read_parquet(fpath, columns=["datetime"]))
+                    return sym, True, cnt
+                except Exception:
+                    pass
             return sym, False, 0
 
         if case_b_symbols:
@@ -224,6 +245,7 @@ class DataVerificationService:
         # ----------------------------------------------------
         recovered_cnt = 0
         unresolved_cnt = 0
+        unresolved_companies_cnt = 0
 
         if companies_needing_gap_fill:
             logger.info(f"Healing missing gaps across {len(companies_needing_gap_fill)} companies...")
@@ -232,71 +254,68 @@ class DataVerificationService:
                 sym, missing_list = item
                 if not missing_list:
                     return sym, 0, 0, []
-                d_min = min(missing_list)
-                d_max = max(missing_list)
-                start_ms, end_ms = self.client.build_time_range_ms(d_min, d_max)
 
-                # 4-attempt retry architecture (1 initial + 3 immediate retries)
+                today_d = datetime.now(IST_TZ).date()
+                historical_missing = [d for d in missing_list if d < today_d]
+                needs_today = (today_d in missing_list)
+
                 rec = 0
                 unres = len(missing_list)
-                missing_set = set(missing_list)
                 healed_items = []
 
-                for attempt in range(1, self.config.max_attempts + 1):
-                    candles, status, err, _ = self.client.fetch_candles_single_attempt(sym, start_ms, end_ms)
-                    if candles:
-                        df, _ = self.store.parse_raw_candles_to_df(candles)
-                        if not df.empty:
-                            df_to_add = df[df["datetime"].dt.date.isin(missing_set)].copy()
-                            if not df_to_add.empty:
-                                self.store.merge_and_save(sym, df_to_add)
-                                rec = len(df_to_add)
-                                unres = len(missing_list) - rec
-                                for _, row in df_to_add.iterrows():
-                                    healed_items.append(CandleChangeRecord(
-                                        symbol=sym,
-                                        target_date=str(row["datetime"])[:10],
-                                        change_type="HEALED",
-                                        open=float(row["open"]),
-                                        high=float(row["high"]),
-                                        low=float(row["low"]),
-                                        close=float(row["close"]),
-                                        volume=int(row["volume"]),
-                                    ))
-                                break
-                    if status == 404:
-                        break
+                # 1. Historical missing dates (strictly date < today) fetched via Charting Service API
+                if historical_missing:
+                    d_min = min(historical_missing)
+                    d_max = max(historical_missing)
+                    start_ms, end_ms = self.client.build_time_range_ms(d_min, d_max)
+                    missing_hist_set = set(historical_missing)
 
-                # If today is among the missing dates and charting service did not return it, heal via Live Quote API!
-                today_d = datetime.now(IST_TZ).date()
-                if today_d in missing_set:
-                    fpath = self.store.get_file_path(sym)
-                    has_today = False
-                    if fpath.exists():
-                        try:
-                            tdf = pd.read_parquet(fpath, columns=["datetime"])
-                            has_today = (tdf["datetime"].dt.date == today_d).any()
-                        except Exception:
-                            pass
-                    if not has_today:
-                        c_live, _, _, _ = self.client.fetch_live_quote_candle(sym, today_d)
-                        if c_live:
-                            df_live, _ = self.store.parse_raw_candles_to_df(c_live)
-                            if not df_live.empty:
-                                self.store.merge_and_save(sym, df_live)
-                                rec += 1
-                                unres = max(0, unres - 1)
-                                for _, row in df_live.iterrows():
-                                    healed_items.append(CandleChangeRecord(
-                                        symbol=sym,
-                                        target_date=str(row["datetime"])[:10],
-                                        change_type="HEALED",
-                                        open=float(row["open"]),
-                                        high=float(row["high"]),
-                                        low=float(row["low"]),
-                                        close=float(row["close"]),
-                                        volume=int(row["volume"]),
-                                    ))
+                    for attempt in range(1, self.config.max_attempts + 1):
+                        candles, status, err, _ = self.client.fetch_candles_single_attempt(sym, start_ms, end_ms)
+                        if candles:
+                            df, _ = self.store.parse_raw_candles_to_df(candles)
+                            if not df.empty:
+                                # Strictly filter to historical missing dates (EXCLUDING today)
+                                df_to_add = df[(df["datetime"].dt.date.isin(missing_hist_set)) & (df["datetime"].dt.date < today_d)].copy()
+                                if not df_to_add.empty:
+                                    self.store.merge_and_save(sym, df_to_add)
+                                    rec += len(df_to_add)
+                                    unres -= len(df_to_add)
+                                    for _, row in df_to_add.iterrows():
+                                        healed_items.append(CandleChangeRecord(
+                                            symbol=sym,
+                                            target_date=str(row["datetime"])[:10],
+                                            change_type="HEALED_HIST",
+                                            open=float(row["open"]),
+                                            high=float(row["high"]),
+                                            low=float(row["low"]),
+                                            close=float(row["close"]),
+                                            volume=int(row["volume"]),
+                                        ))
+                                    break
+                        if status == 404:
+                            break
+
+                # 2. For today's candle: ALWAYS strictly use Live Quote API (tr_live_prices) - NEVER Charting Service!
+                if needs_today and self.calendar.is_trading_day(today_d):
+                    c_live, _, _, _ = self.client.fetch_live_quote_candle(sym, today_d)
+                    if c_live:
+                        df_live, _ = self.store.parse_raw_candles_to_df(c_live)
+                        if not df_live.empty:
+                            self.store.merge_and_save(sym, df_live)
+                            rec += 1
+                            unres = max(0, unres - 1)
+                            for _, row in df_live.iterrows():
+                                healed_items.append(CandleChangeRecord(
+                                    symbol=sym,
+                                    target_date=str(row["datetime"])[:10],
+                                    change_type="HEALED_LIVE",
+                                    open=float(row["open"]),
+                                    high=float(row["high"]),
+                                    low=float(row["low"]),
+                                    close=float(row["close"]),
+                                    volume=int(row["volume"]),
+                                ))
 
                 return sym, rec, unres, healed_items
 
@@ -306,9 +325,11 @@ class DataVerificationService:
             for _, rec, unres, h_items in heal_results:
                 recovered_cnt += rec
                 unresolved_cnt += unres
+                if unres > 0:
+                    unresolved_companies_cnt += 1
                 verif_rep.healed_records.extend(h_items)
 
-        verif_rep.total_complete_historical = len(companies_complete) + (len(companies_needing_gap_fill) - sum(1 for _, _, u in heal_results if u > 0) if companies_needing_gap_fill else 0)
+        verif_rep.total_complete_historical = len(companies_complete) + (len(companies_needing_gap_fill) - unresolved_companies_cnt if companies_needing_gap_fill else 0)
         verif_rep.total_with_missing_candles = len(companies_needing_gap_fill)
         verif_rep.total_missing_candles_recovered = recovered_cnt
         verif_rep.total_missing_still_unresolved = unresolved_cnt

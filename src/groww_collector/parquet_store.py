@@ -82,6 +82,35 @@ class ParquetStore:
             logger.warning(f"Error reading dates from {path}: {e}")
             return set()
 
+    def get_last_candle_before(self, symbol: str, target_date: date) -> dict[str, Any] | None:
+        """Read the most recent candle strictly prior to target_date from {symbol}_Day.parquet."""
+        path = self.get_file_path(symbol)
+        if not path.exists():
+            return None
+        lock = self.get_symbol_lock(symbol)
+        with lock:
+            try:
+                df = pd.read_parquet(path, columns=["datetime", "open", "high", "low", "close", "volume"])
+                if df.empty:
+                    return None
+                dt_series = pd.to_datetime(df["datetime"]).dt.tz_convert(IST_TZ).dt.date
+                hist = df[dt_series < target_date]
+                if hist.empty:
+                    return None
+                last_row = hist.iloc[-1]
+                return {
+                    "datetime": last_row["datetime"],
+                    "date": dt_series.iloc[len(hist) - 1],
+                    "open": float(last_row["open"]),
+                    "high": float(last_row["high"]),
+                    "low": float(last_row["low"]),
+                    "close": float(last_row["close"]),
+                    "volume": int(last_row["volume"]),
+                }
+            except Exception as e:
+                logger.warning(f"Error reading last candle for {symbol}: {e}")
+                return None
+
     def parse_raw_candles_to_df(
         self,
         candles: list[list[Any]],
@@ -228,6 +257,42 @@ class ParquetStore:
                 self._atomic_write(sec_path, table)
 
             return inserted_count, updated_count, len(combined)
+
+    def overwrite_atomic(self, symbol: str, df: pd.DataFrame) -> int:
+        """Atomically overwrite {symbol}_Day.parquet with a full historical DataFrame (e.g. after split/merge).
+        
+        Returns:
+            total_records_written
+        """
+        if df is None or df.empty:
+            return 0
+
+        sym = symbol.strip().upper()
+        lock = self.get_symbol_lock(sym)
+        primary_path = self.get_file_path(sym, self.config.data_dir)
+
+        with lock:
+            clean_df = df.copy()
+            # Normalize datetime
+            dt_s = pd.to_datetime(clean_df["datetime"]).dt.tz_convert(IST_TZ).dt.floor("D")
+            clean_df["datetime"] = dt_s.astype("datetime64[ms, Asia/Kolkata]")
+            clean_df["_temp_date"] = dt_s.dt.date
+            clean_df = clean_df.drop_duplicates(subset=["_temp_date"], keep="last")
+            clean_df = clean_df.sort_values("datetime", ascending=True).reset_index(drop=True)
+            clean_df = clean_df.drop(columns=["_temp_date"], errors="ignore")
+
+            for col in ["open", "high", "low", "close"]:
+                clean_df[col] = clean_df[col].astype("float64")
+            clean_df["volume"] = clean_df["volume"].fillna(0).round().astype("int64")
+
+            table = pa.Table.from_pandas(clean_df[EXPECTED_COLUMNS], schema=PARQUET_SCHEMA, preserve_index=False)
+            self._atomic_write(primary_path, table)
+
+            if self.config.secondary_data_dir and self.config.secondary_data_dir.exists():
+                sec_path = self.get_file_path(sym, self.config.secondary_data_dir)
+                self._atomic_write(sec_path, table)
+
+            return len(clean_df)
 
     def _atomic_write(self, target_path: Path, table: pa.Table):
         """Write Table to temporary file and atomically rename/replace."""
