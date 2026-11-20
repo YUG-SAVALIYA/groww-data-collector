@@ -417,5 +417,35 @@ class TestGrowwCollectionSystem(unittest.TestCase):
         self.assertIn("2026-11-17", text)
         self.assertIn("2026-11-18", text)
 
+    def test_daily_fetch_overwrites_existing_today_candle(self):
+        """Verify that when a candle for today already exists, re-running daily fetch overwrites it with latest values."""
+        sym = "OVERWRITE_TEST"
+        today_ts = 1795113000  # Nov 20, 2026
+
+        # 1. Initial morning run: Close = 100.0, Volume = 1,000
+        initial_candle = [[today_ts, 98.0, 102.0, 97.0, 100.0, 1000]]
+        df_init, _ = self.store.parse_raw_candles_to_df(initial_candle)
+        ins, upd, tot = self.store.merge_and_save(sym, df_init)
+        self.assertEqual(ins, 1)
+        self.assertEqual(upd, 0)
+        self.assertEqual(tot, 1)
+
+        # 2. Later evening run: Market closed with new final figures: Close = 112.5, Volume = 8,500
+        updated_candle = [[today_ts, 98.0, 115.0, 97.0, 112.5, 8500]]
+        df_updated, _ = self.store.parse_raw_candles_to_df(updated_candle)
+        ins2, upd2, tot2 = self.store.merge_and_save(sym, df_updated)
+        
+        # Must be treated as an UPDATE (overwrite) rather than INSERT
+        self.assertEqual(ins2, 0)
+        self.assertEqual(upd2, 1)
+        self.assertEqual(tot2, 1)  # Total row count remains strictly 1 (no duplicate row)
+
+        # 3. Read back from Parquet to ensure values on disk are overwritten
+        df_disk = self.store.read_df(sym)
+        self.assertEqual(len(df_disk), 1)
+        self.assertEqual(float(df_disk.iloc[0]["close"]), 112.5)
+        self.assertEqual(int(df_disk.iloc[0]["volume"]), 8500)
+        self.assertEqual(float(df_disk.iloc[0]["high"]), 115.0)
+
 if __name__ == "__main__":
     unittest.main()
