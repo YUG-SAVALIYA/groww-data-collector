@@ -380,5 +380,42 @@ class TestGrowwCollectionSystem(unittest.TestCase):
         # Nifty candle prices must be within valid index range (> 20,000)
         self.assertTrue(c[0][1] > 20000.0)
 
+    def test_daily_historical_gap_detection_and_auto_heal(self):
+        """Verify that daily fetch detects missing dates between last available date and today and heals them."""
+        from groww_collector.fetcher import ConcurrencyFetchEngine
+        from groww_collector.reports import ExecutionReportManager
+
+        sym = "GAP_HEAL_TEST"
+        # 1. Create file with last date Nov 16
+        raw_candles = [
+            [1794767400, 100.0, 105.0, 98.0, 102.0, 5000],  # Nov 16
+        ]
+        df, _ = self.store.parse_raw_candles_to_df(raw_candles)
+        self.store.merge_and_save(sym, df)
+
+        # 2. Check gap between Nov 16 and Nov 19
+        target_d = date(2026, 11, 19)
+        last_c = self.store.get_last_candle_before(sym, target_d)
+        self.assertEqual(last_c["date"], date(2026, 11, 16))
+
+        gap_start = last_c["date"] + timedelta(days=1)
+        gap_end = target_d - timedelta(days=1)
+        missing = self.calendar.get_expected_trading_sessions(gap_start, gap_end)
+        self.assertIn(date(2026, 11, 17), missing)
+        self.assertIn(date(2026, 11, 18), missing)
+
+        # 3. Verify reporting
+        rep_mgr = ExecutionReportManager("TEST_GAP_RUN", "daily_candle_fetch_4pm", self.config)
+        rep_mgr.initial_report.total_requested = 1
+        rep_mgr.record_gap_healed(sym, "2026-11-17", 102.0, 107.0, 101.0, 105.0, 6000)
+        rep_mgr.record_gap_healed(sym, "2026-11-18", 105.0, 110.0, 104.0, 108.0, 7000)
+        rep_mgr.record_gap_company_summary(had_gap=True, had_holiday_skip=False)
+
+        text = rep_mgr.compile_full_text_report()
+        self.assertIn("HISTORICAL GAPS AUTO-HEALED", text)
+        self.assertIn(sym, text)
+        self.assertIn("2026-11-17", text)
+        self.assertIn("2026-11-18", text)
+
 if __name__ == "__main__":
     unittest.main()

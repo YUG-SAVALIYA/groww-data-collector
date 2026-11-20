@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 import uuid
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Any
 from pathlib import Path
@@ -48,27 +48,21 @@ class ConcurrencyFetchEngine:
             except Exception as e:
                 logger.warning(f"Could not read bundled universe: {e}")
 
-        if not syms:
-            if self.config.catalog_path.exists():
-                try:
-                    cat = pd.read_csv(self.config.catalog_path)
-                    syms.update(cat["Symbol"].dropna().astype(str).str.strip().str.upper().unique())
-                except Exception as e:
-                    logger.warning(f"Could not read catalog: {e}")
+        if not syms and self.config.catalog_path.exists():
+            try:
+                cat = pd.read_csv(self.config.catalog_path)
+                syms.update(cat["Symbol"].dropna().astype(str).str.strip().str.upper().unique())
+            except Exception as e:
+                logger.warning(f"Could not read catalog: {e}")
 
-        if not syms:
-            syms.update([
-                f.name.replace("_Day.parquet", "").strip().upper()
-                for f in self.config.data_dir.glob("*_Day.parquet")
-            ])
+        # Always include every parquet file already present in data directory (indices, existing stocks)
+        if self.config.data_dir.exists():
+            for f in self.config.data_dir.glob("*_Day.parquet"):
+                syms.add(f.name.replace("_Day.parquet", "").strip().upper())
 
         # Always include benchmark indices: NIFTY and BANKNIFTY
         syms.add("NIFTY")
         syms.add("BANKNIFTY")
-
-        # Also maintain NIFTY500 if present in data directory
-        if (self.config.data_dir / "NIFTY500_Day.parquet").exists():
-            syms.add("NIFTY500")
 
         return sorted(list(syms))
 
@@ -221,6 +215,8 @@ class ConcurrencyFetchEngine:
             + report_manager.retry_report.recovered_retry_3
         )
         report_manager.summary.total_unresolved_companies = tot_unresolved
+        report_manager.summary.total_gap_candles_healed = report_manager.initial_report.total_gap_candles_recovered
+        report_manager.summary.total_holidays_skipped = report_manager.initial_report.total_holidays_skipped
         report_manager.summary.overall_status = "COMPLETED_WITH_UNRESOLVED" if tot_unresolved > 0 else "ALL_SUCCESSFUL"
 
         return {
@@ -257,8 +253,100 @@ class ConcurrencyFetchEngine:
         logger.info(f"[{run_id}] Executing 4:00 PM Daily Candle Fetch for date {target_date} across {len(symbols)} companies...")
 
         def worker_task(sym: str, attempt: int, r_id: str):
-            # Fetch using Groww Live Quote API (tr_live_prices) to get the accurate closing LTP price!
-            # Falls back seamlessly to charting service if live quote is unavailable.
+            prev_candle = None
+            prev_close = 0.0
+            healed_count = 0
+            has_gap = False
+            had_holiday_skip = False
+
+            # Case A: File does not exist yet on disk (new stock or fresh setup)
+            if not self.store.exists(sym):
+                start_year = self.config.history_start_year
+                start_dt = datetime(start_year, 1, 1, 0, 0, 0, tzinfo=IST_TZ)
+                start_ms = int(start_dt.timestamp() * 1000)
+                yesterday_dt = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=IST_TZ)
+                yesterday_ms = int(yesterday_dt.timestamp() * 1000)
+
+                df_hist = pd.DataFrame()
+                for _ in range(self.config.max_attempts):
+                    c_hist, _, _, _ = self.client.fetch_candles_single_attempt(sym, start_ms, yesterday_ms)
+                    if c_hist:
+                        df_h_parsed, _ = self.store.parse_raw_candles_to_df(c_hist)
+                        if not df_h_parsed.empty:
+                            df_hist = df_h_parsed[df_h_parsed["datetime"].dt.date < target_date].copy()
+                            break
+
+                candles, status, err, sym_used = self.client.fetch_live_quote_candle(sym, target_date)
+                if not candles:
+                    return False, 0, 0, 0, err or "Empty candle response"
+
+                today_df, invalids = self.store.parse_raw_candles_to_df(candles)
+                if today_df.empty:
+                    return False, 0, 0, 0, "No valid candles after OHLCV validation"
+
+                full_df = pd.concat([df_hist, today_df], ignore_index=True)
+                full_df = full_df.drop_duplicates(subset=["datetime"], keep="last").sort_values("datetime").reset_index(drop=True)
+                self.store.overwrite_atomic(sym, full_df)
+                today_row = today_df.iloc[-1]
+                rep_mgr.record_candle_change(
+                    sym, str(target_date), "ADDED",
+                    float(today_row["open"]), float(today_row["high"]),
+                    float(today_row["low"]), float(today_row["close"]),
+                    int(today_row["volume"]),
+                )
+                rep_mgr.record_gap_company_summary(had_gap=False, had_holiday_skip=False)
+                return True, len(full_df), 1, 0, None
+
+            # Case B: File exists on disk -> Check for Historical Date Gaps First!
+            prev_candle = self.store.get_last_candle_before(sym, target_date)
+            if prev_candle is not None:
+                last_stored_date = prev_candle["date"]
+                prev_close = float(prev_candle["close"])
+
+                gap_start = last_stored_date + timedelta(days=1)
+                gap_end = target_date - timedelta(days=1)
+
+                if gap_start <= gap_end:
+                    # Intermediate calendar days exist between last stored date and target date!
+                    missing_sessions = self.calendar.get_expected_trading_sessions(gap_start, gap_end)
+                    if missing_sessions:
+                        has_gap = True
+                        logger.info(
+                            f"[{sym}] Gap detected: {len(missing_sessions)} missing trading session(s) "
+                            f"({missing_sessions[0]} to {missing_sessions[-1]}). Healing via Historical API..."
+                        )
+                        start_ms, end_ms = self.client.build_time_range_ms(min(missing_sessions), max(missing_sessions))
+                        c_gap, st_g, err_g, _ = self.client.fetch_candles_single_attempt(sym, start_ms, end_ms)
+                        if c_gap:
+                            df_gap_parsed, _ = self.store.parse_raw_candles_to_df(c_gap)
+                            if not df_gap_parsed.empty:
+                                missing_set = set(missing_sessions)
+                                df_gap_clean = df_gap_parsed[
+                                    (df_gap_parsed["datetime"].dt.date.isin(missing_set)) &
+                                    (df_gap_parsed["datetime"].dt.date < target_date)
+                                ].copy()
+                                if not df_gap_clean.empty:
+                                    self.store.merge_and_save(sym, df_gap_clean)
+                                    healed_count = len(df_gap_clean)
+                                    for _, r_gap in df_gap_clean.iterrows():
+                                        rep_mgr.record_gap_healed(
+                                            symbol=sym,
+                                            target_date=str(r_gap["datetime"])[:10],
+                                            open_val=float(r_gap["open"]),
+                                            high_val=float(r_gap["high"]),
+                                            low_val=float(r_gap["low"]),
+                                            close_val=float(r_gap["close"]),
+                                            volume_val=int(r_gap["volume"]),
+                                        )
+                                    # Update prev_close to be the close of the most recently healed gap candle
+                                    prev_close = float(df_gap_clean.iloc[-1]["close"])
+                    else:
+                        # Gap days were strictly weekends or exchange holidays (zero network calls needed)
+                        had_holiday_skip = True
+
+            rep_mgr.record_gap_company_summary(had_gap=has_gap, had_holiday_skip=had_holiday_skip)
+
+            # Step 2: Fetch Today's Live Candle
             candles, status, err, sym_used = self.client.fetch_live_quote_candle(sym, target_date)
             if not candles:
                 return False, 0, 0, 0, err or "Empty candle response"
@@ -270,82 +358,50 @@ class ConcurrencyFetchEngine:
             today_row = today_df.iloc[-1]
             today_open = float(today_row["open"])
 
-            # Case A: File does not exist yet on disk (new stock or fresh setup)
-            if not self.store.exists(sym):
-                start_year = self.config.history_start_year
-                start_dt = datetime(start_year, 1, 1, 0, 0, 0, tzinfo=IST_TZ)
-                start_ms = int(start_dt.timestamp() * 1000)
-                yesterday_dt = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=IST_TZ)
-                yesterday_ms = int(yesterday_dt.timestamp() * 1000)
+            # Step 3: Check for Stock Split / Consolidation (>20% price shift)
+            if prev_candle is not None and prev_close > 0 and today_open > 0:
+                shift_pct = abs(today_open - prev_close) / prev_close
+                if shift_pct > 0.20 and sym not in {"NIFTY", "BANKNIFTY", "NIFTY500"}:
+                    logger.warning(
+                        f"[CORPORATE ACTION / SPLIT DETECTED] {sym}: Yesterday Close={prev_close:.2f}, "
+                        f"Today Open={today_open:.2f} (Shift: {shift_pct*100:.2f}% > 20%). "
+                        f"Re-fetching adjusted historical series from {self.config.history_start_year} to today..."
+                    )
+                    start_year = self.config.history_start_year
+                    start_dt = datetime(start_year, 1, 1, 0, 0, 0, tzinfo=IST_TZ)
+                    start_ms = int(start_dt.timestamp() * 1000)
+                    yesterday_dt = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=IST_TZ)
+                    yesterday_ms = int(yesterday_dt.timestamp() * 1000)
 
-                full_df = today_df.copy()
-                for _ in range(self.config.max_attempts):
-                    c_hist, _, _, _ = self.client.fetch_candles_single_attempt(sym, start_ms, yesterday_ms)
-                    if c_hist:
-                        df_hist, _ = self.store.parse_raw_candles_to_df(c_hist)
-                        if not df_hist.empty:
-                            df_hist = df_hist[df_hist["datetime"].dt.date < target_date].copy()
-                            full_df = pd.concat([df_hist, today_df], ignore_index=True)
-                            full_df = full_df.drop_duplicates(subset=["datetime"], keep="last").sort_values("datetime").reset_index(drop=True)
+                    split_healed = False
+                    for h_attempt in range(1, self.config.max_attempts + 1):
+                        c_hist, st, err_h, _ = self.client.fetch_candles_single_attempt(sym, start_ms, yesterday_ms)
+                        if c_hist:
+                            df_hist, _ = self.store.parse_raw_candles_to_df(c_hist)
+                            if not df_hist.empty:
+                                df_hist = df_hist[df_hist["datetime"].dt.date < target_date].copy()
+                                full_df = pd.concat([df_hist, today_df], ignore_index=True)
+                                full_df = full_df.drop_duplicates(subset=["datetime"], keep="last").sort_values("datetime").reset_index(drop=True)
+                                tot_written = self.store.overwrite_atomic(sym, full_df)
+                                rep_mgr.record_split_detected(
+                                    symbol=sym,
+                                    target_date=str(target_date),
+                                    prev_close=prev_close,
+                                    today_open=today_open,
+                                    shift_pct=shift_pct,
+                                    candles_restored=tot_written,
+                                )
+                                split_healed = True
+                                break
+                        if st == 404:
                             break
 
-                self.store.overwrite_atomic(sym, full_df)
-                rep_mgr.record_candle_change(
-                    sym, str(target_date), "ADDED",
-                    float(today_row["open"]), float(today_row["high"]),
-                    float(today_row["low"]), float(today_row["close"]),
-                    int(today_row["volume"]),
-                )
-                return True, len(full_df), 1, 0, None
+                    if split_healed:
+                        return True, len(full_df), 0, 1, None
+                    else:
+                        logger.error(f"Failed to fetch split-adjusted history for {sym}. Proceeding with standard candle update.")
 
-            # Case B: File exists on disk -> Check for Stock Split / Consolidation (>20% price shift)
-            prev_candle = self.store.get_last_candle_before(sym, target_date)
-            if prev_candle is not None:
-                prev_close = float(prev_candle["close"])
-                if prev_close > 0 and today_open > 0:
-                    shift_pct = abs(today_open - prev_close) / prev_close
-                    if shift_pct > 0.20:
-                        # Corporate action detected! Auto-heal entire 2015-today history with split-adjusted series
-                        logger.warning(
-                            f"[CORPORATE ACTION / SPLIT DETECTED] {sym}: Yesterday Close={prev_close:.2f}, "
-                            f"Today Open={today_open:.2f} (Shift: {shift_pct*100:.2f}% > 20%). "
-                            f"Re-fetching adjusted historical series from {self.config.history_start_year} to today..."
-                        )
-                        start_year = self.config.history_start_year
-                        start_dt = datetime(start_year, 1, 1, 0, 0, 0, tzinfo=IST_TZ)
-                        start_ms = int(start_dt.timestamp() * 1000)
-                        yesterday_dt = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=IST_TZ)
-                        yesterday_ms = int(yesterday_dt.timestamp() * 1000)
-
-                        split_healed = False
-                        for h_attempt in range(1, self.config.max_attempts + 1):
-                            c_hist, st, err_h, _ = self.client.fetch_candles_single_attempt(sym, start_ms, yesterday_ms)
-                            if c_hist:
-                                df_hist, _ = self.store.parse_raw_candles_to_df(c_hist)
-                                if not df_hist.empty:
-                                    df_hist = df_hist[df_hist["datetime"].dt.date < target_date].copy()
-                                    full_df = pd.concat([df_hist, today_df], ignore_index=True)
-                                    full_df = full_df.drop_duplicates(subset=["datetime"], keep="last").sort_values("datetime").reset_index(drop=True)
-                                    tot_written = self.store.overwrite_atomic(sym, full_df)
-                                    rep_mgr.record_split_detected(
-                                        symbol=sym,
-                                        target_date=str(target_date),
-                                        prev_close=prev_close,
-                                        today_open=today_open,
-                                        shift_pct=shift_pct,
-                                        candles_restored=tot_written,
-                                    )
-                                    split_healed = True
-                                    break
-                            if st == 404:
-                                break
-
-                        if split_healed:
-                            return True, len(full_df), 0, 1, None
-                        else:
-                            logger.error(f"Failed to fetch split-adjusted history for {sym}. Proceeding with standard candle update.")
-
-            # Standard Daily Merge & Save
+            # Step 4: Standard Daily Merge & Save
             ins_cnt, upd_cnt, tot = self.store.merge_and_save(sym, today_df)
             if ins_cnt > 0 or upd_cnt > 0:
                 o = float(today_row["open"])
@@ -359,7 +415,7 @@ class ConcurrencyFetchEngine:
                 elif upd_cnt > 0:
                     rep_mgr.record_candle_change(sym, d_str, "UPDATED", o, h, l, c, v)
 
-            return True, len(today_df), ins_cnt, upd_cnt, None
+            return True, len(today_df) + healed_count, ins_cnt, upd_cnt, None
 
         self.execute_with_immediate_retries(
             items=symbols,

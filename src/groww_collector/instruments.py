@@ -138,6 +138,19 @@ class InstrumentSyncService:
                 "Listing_Date": "2015-01-01",
             }
 
+        # Include any existing parquet files present on disk so everything in data directory is cataloged
+        if self.config.data_dir.exists():
+            for f in self.config.data_dir.glob("*_Day.parquet"):
+                sym = f.name.replace("_Day.parquet", "").strip().upper()
+                if sym and sym not in records:
+                    records[sym] = {
+                        "Symbol": sym,
+                        "Company_Name": sym,
+                        "Series": "EQ",
+                        "ISIN": sym,
+                        "Listing_Date": "2015-01-01",
+                    }
+
         if not existing_catalog.empty:
             for _, row in existing_catalog.iterrows():
                 sym = str(row.get("Symbol", "")).strip().upper()
