@@ -38,38 +38,38 @@ class ConcurrencyFetchEngine:
         self.migration_tracker = migration_tracker or MigrationTracker(config)
 
     def load_universe_symbols(self) -> list[str]:
-        """Load target universe of companies from bundled universe (strictly 2,404 NSE EQ active companies)."""
+        """Load target universe: 2,404 active NSE EQ companies + benchmark indices (NIFTY, BANKNIFTY)."""
+        syms = set()
         # 1. Guaranteed baseline: Bundled 2,404 active NSE Series EQ universe
         if self.config.bundled_universe_path.exists():
             try:
                 b_df = pd.read_csv(self.config.bundled_universe_path)
-                syms = sorted(b_df["Symbol"].dropna().astype(str).str.strip().str.upper().unique().tolist())
-                if len(syms) == 2404:
-                    return syms
+                syms.update(b_df["Symbol"].dropna().astype(str).str.strip().str.upper().unique().tolist())
             except Exception as e:
                 logger.warning(f"Could not read bundled universe: {e}")
 
-        syms = set()
-        try:
-            eligible = self.migration_tracker.get_eligible_eq_symbols()
-            if eligible:
-                syms.update(eligible)
-        except Exception as e:
-            logger.debug(f"Could not load eligible symbols from migration tracker: {e}")
-
-        if self.config.catalog_path.exists():
-            try:
-                cat = pd.read_csv(self.config.catalog_path)
-                cat_syms = cat["Symbol"].dropna().astype(str).str.strip().str.upper().unique()
-                syms.update(cat_syms)
-            except Exception as e:
-                logger.warning(f"Could not read catalog: {e}")
+        if not syms:
+            if self.config.catalog_path.exists():
+                try:
+                    cat = pd.read_csv(self.config.catalog_path)
+                    syms.update(cat["Symbol"].dropna().astype(str).str.strip().str.upper().unique())
+                except Exception as e:
+                    logger.warning(f"Could not read catalog: {e}")
 
         if not syms:
             syms.update([
                 f.name.replace("_Day.parquet", "").strip().upper()
                 for f in self.config.data_dir.glob("*_Day.parquet")
             ])
+
+        # Always include benchmark indices: NIFTY and BANKNIFTY
+        syms.add("NIFTY")
+        syms.add("BANKNIFTY")
+
+        # Also maintain NIFTY500 if present in data directory
+        if (self.config.data_dir / "NIFTY500_Day.parquet").exists():
+            syms.add("NIFTY500")
+
         return sorted(list(syms))
 
     def execute_with_immediate_retries(

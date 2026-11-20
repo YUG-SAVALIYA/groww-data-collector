@@ -119,6 +119,25 @@ class InstrumentSyncService:
             except Exception as e:
                 logger.warning(f"Could not load bundled active list: {e}")
 
+        # Add benchmark indices: NIFTY and BANKNIFTY
+        for idx_sym, idx_name in [("NIFTY", "Nifty 50 Index"), ("BANKNIFTY", "Nifty Bank Index")]:
+            if idx_sym not in records:
+                records[idx_sym] = {
+                    "Symbol": idx_sym,
+                    "Company_Name": idx_name,
+                    "Series": "INDEX",
+                    "ISIN": idx_sym,
+                    "Listing_Date": "2015-01-01",
+                }
+        if (self.config.data_dir / "NIFTY500_Day.parquet").exists() and "NIFTY500" not in records:
+            records["NIFTY500"] = {
+                "Symbol": "NIFTY500",
+                "Company_Name": "Nifty 500 Index",
+                "Series": "INDEX",
+                "ISIN": "NIFTY500",
+                "Listing_Date": "2015-01-01",
+            }
+
         if not existing_catalog.empty:
             for _, row in existing_catalog.iterrows():
                 sym = str(row.get("Symbol", "")).strip().upper()

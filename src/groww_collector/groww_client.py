@@ -120,6 +120,12 @@ class GrowwAPIClient:
         Returns:
             (candles, http_status, error_message, candidate_used)
         """
+        # Benchmark indices (NIFTY, BANKNIFTY, NIFTY500) are accurately served via Groww Charting Service
+        sym_clean = symbol.strip().upper()
+        if sym_clean in {"NIFTY", "BANKNIFTY", "NIFTY500"}:
+            start_ms, end_ms = self.build_time_range_ms(target_date, target_date)
+            return self.fetch_candles_single_attempt(sym_clean, start_ms, end_ms)
+
         session = self.get_session()
         candidates = self.get_candidate_symbols(symbol)
         last_error = None

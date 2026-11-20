@@ -245,8 +245,13 @@ class ParquetStore:
                     f"Safety violation: merged row count ({len(combined)}) is smaller than existing ({len(existing_df)})!"
                 )
 
+            # Ensure numeric precision and integer volume (handles index files where volume may be float/null)
+            for col in ["open", "high", "low", "close"]:
+                combined[col] = combined[col].astype("float64")
+            combined["volume"] = combined["volume"].fillna(0).round().astype("int64")
+
             # Convert to PyArrow Table with exact schema
-            table = pa.Table.from_pandas(combined, schema=PARQUET_SCHEMA, preserve_index=False)
+            table = pa.Table.from_pandas(combined[EXPECTED_COLUMNS], schema=PARQUET_SCHEMA, preserve_index=False)
 
             # Atomic write to primary data directory
             self._atomic_write(primary_path, table)

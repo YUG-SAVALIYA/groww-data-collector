@@ -362,5 +362,23 @@ class TestGrowwCollectionSystem(unittest.TestCase):
         self.assertFalse(args_default.all)
         self.assertFalse(args_default.daemon)
 
+    def test_index_symbols_inclusion_and_live_fetch(self):
+        """Verify NIFTY and BANKNIFTY are included in universe and routed to Charting Service."""
+        from groww_collector.fetcher import ConcurrencyFetchEngine
+        from groww_collector.groww_client import GrowwAPIClient
+
+        engine = ConcurrencyFetchEngine(self.config)
+        syms = engine.load_universe_symbols()
+        self.assertIn("NIFTY", syms)
+        self.assertIn("BANKNIFTY", syms)
+
+        client = GrowwAPIClient(self.config)
+        t_date = date(2026, 11, 19)
+        c, status, err, sym = client.fetch_live_quote_candle("NIFTY", t_date)
+        self.assertEqual(status, 200)
+        self.assertTrue(len(c) > 0)
+        # Nifty candle prices must be within valid index range (> 20,000)
+        self.assertTrue(c[0][1] > 20000.0)
+
 if __name__ == "__main__":
     unittest.main()
