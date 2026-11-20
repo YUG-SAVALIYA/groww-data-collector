@@ -12,7 +12,7 @@ import urllib3
 # Suppress insecure request warnings if any
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-from .config import CollectorConfig, DEFAULT_CONFIG, IST_TZ
+from .config import CollectorConfig, DEFAULT_CONFIG, IST_TZ, NSE_INDEX_SYMBOLS
 
 class GrowwAPIClient:
     """Thread-safe Groww charting client with per-thread sessions and connection pooling."""
@@ -120,9 +120,9 @@ class GrowwAPIClient:
         Returns:
             (candles, http_status, error_message, candidate_used)
         """
-        # Benchmark indices (NIFTY, BANKNIFTY, NIFTY500) are accurately served via Groww Charting Service
+        # Benchmark and Sectoral NSE indices are accurately served via Groww Charting Service
         sym_clean = symbol.strip().upper()
-        if sym_clean in {"NIFTY", "BANKNIFTY", "NIFTY500"}:
+        if sym_clean in NSE_INDEX_SYMBOLS:
             start_ms, end_ms = self.build_time_range_ms(target_date, target_date)
             return self.fetch_candles_single_attempt(sym_clean, start_ms, end_ms)
 

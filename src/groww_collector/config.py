@@ -130,3 +130,52 @@ class CollectorConfig:
 
 # Global default config instance
 DEFAULT_CONFIG = CollectorConfig()
+
+# 39 Requested NSE Benchmark, Broad Market, Sectoral & Thematic Indices
+NSE_INDEX_CATALOG: dict[str, str] = {
+    # Broad Market (14)
+    "NIFTY": "NIFTY 50",
+    "NIFTYJR": "NIFTY Next 50",
+    "NIFTY100": "NIFTY 100",
+    "NIFTY200": "NIFTY 200",
+    "NIFTY500": "NIFTY 500",
+    "MIDCAP50": "NIFTY Midcap 50",
+    "NIFTYMIDCAP": "NIFTY Midcap 100",
+    "NIFTYMIDCAP150": "NIFTY Midcap 150",
+    "NIFTYSMALL": "NIFTY Smallcap 100",
+    "NIFTYSMALLCAP50": "NIFTY Smallcap 50",
+    "NIFTYSMALLCAP250": "NIFTY Smallcap 250",
+    "NIFTYMICRO250": "NIFTY Microcap 250",
+    "NIFTYMIDSMALL400": "NIFTY MidSmallcap 400",
+    "NIFTYTOTALMCAP": "NIFTY Total Market",
+    # Sectoral & Banking (11)
+    "BANKNIFTY": "NIFTY Bank",
+    "FINNIFTY": "NIFTY Financial Services",
+    "NIFTYPSUBANK": "NIFTY PSU Bank",
+    "NIFTYPVTBANK": "NIFTY Private Bank",
+    "NIFTYAUTO": "NIFTY Auto",
+    "NIFTYIT": "NIFTY IT",
+    "NIFTYPHARMA": "NIFTY Pharma",
+    "NIFTYHEALTH": "NIFTY Healthcare",
+    "NIFTYFMCG": "NIFTY FMCG",
+    "NIFTYMETAL": "NIFTY Metal",
+    "NIFTYREALTY": "NIFTY Realty",
+    # Thematic & Macro (14)
+    "NIFTYENERGY": "NIFTY Energy",
+    "NIFTYCDTY": "NIFTY Commodities",
+    "NIFTYPSE": "NIFTY PSE",
+    "NIFTYCPSE": "NIFTY CPSE",
+    "NIFTYHOUSING": "NIFTY Housing",
+    "NIFTYDIGITAL": "NIFTY India Digital",
+    "NIFTYMOBILITY": "NIFTY Mobility",
+    "NIFTYMFG": "NIFTY India Manufacturing",
+    "NIFTYMNC": "NIFTY MNC",
+    "NIFTYMEDIA": "NIFTY Media",
+    "NIFTYIPO": "NIFTY IPO",
+    "NIFTYMIDSELECT": "NIFTY Midcap Select",
+    "NIFTYWAVES": "NIFTY Waves",
+    "NIFTY100ESG": "NIFTY 100 ESG",
+}
+
+NSE_INDEX_SYMBOLS: set[str] = set(NSE_INDEX_CATALOG.keys())
+

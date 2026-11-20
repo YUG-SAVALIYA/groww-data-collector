@@ -10,7 +10,7 @@ from typing import Callable, Any
 from pathlib import Path
 import pandas as pd
 
-from .config import CollectorConfig, DEFAULT_CONFIG, IST_TZ
+from .config import CollectorConfig, DEFAULT_CONFIG, IST_TZ, NSE_INDEX_SYMBOLS
 from .groww_client import GrowwAPIClient
 from .calendar_service import NSECalendarService
 from .parquet_store import ParquetStore
@@ -60,9 +60,8 @@ class ConcurrencyFetchEngine:
             for f in self.config.data_dir.glob("*_Day.parquet"):
                 syms.add(f.name.replace("_Day.parquet", "").strip().upper())
 
-        # Always include benchmark indices: NIFTY and BANKNIFTY
-        syms.add("NIFTY")
-        syms.add("BANKNIFTY")
+        # Always include all 39 NSE indices
+        syms.update(NSE_INDEX_SYMBOLS)
 
         return sorted(list(syms))
 
@@ -277,25 +276,32 @@ class ConcurrencyFetchEngine:
                             break
 
                 candles, status, err, sym_used = self.client.fetch_live_quote_candle(sym, target_date)
-                if not candles:
+                today_df = pd.DataFrame()
+                if candles:
+                    today_df, _ = self.store.parse_raw_candles_to_df(candles)
+
+                if today_df.empty and df_hist.empty:
                     return False, 0, 0, 0, err or "Empty candle response"
 
-                today_df, invalids = self.store.parse_raw_candles_to_df(candles)
-                if today_df.empty:
-                    return False, 0, 0, 0, "No valid candles after OHLCV validation"
+                if not today_df.empty and not df_hist.empty:
+                    full_df = pd.concat([df_hist, today_df], ignore_index=True)
+                elif not df_hist.empty:
+                    full_df = df_hist
+                else:
+                    full_df = today_df
 
-                full_df = pd.concat([df_hist, today_df], ignore_index=True)
                 full_df = full_df.drop_duplicates(subset=["datetime"], keep="last").sort_values("datetime").reset_index(drop=True)
                 self.store.overwrite_atomic(sym, full_df)
-                today_row = today_df.iloc[-1]
-                rep_mgr.record_candle_change(
-                    sym, str(target_date), "ADDED",
-                    float(today_row["open"]), float(today_row["high"]),
-                    float(today_row["low"]), float(today_row["close"]),
-                    int(today_row["volume"]),
-                )
+                if not today_df.empty:
+                    today_row = today_df.iloc[-1]
+                    rep_mgr.record_candle_change(
+                        sym, str(target_date), "ADDED",
+                        float(today_row["open"]), float(today_row["high"]),
+                        float(today_row["low"]), float(today_row["close"]),
+                        int(today_row["volume"]),
+                    )
                 rep_mgr.record_gap_company_summary(had_gap=False, had_holiday_skip=False)
-                return True, len(full_df), 1, 0, None
+                return True, len(full_df), 1 if not today_df.empty else 0, 0, None
 
             # Case B: File exists on disk -> Check for Historical Date Gaps First!
             prev_candle = self.store.get_last_candle_before(sym, target_date)
@@ -349,10 +355,17 @@ class ConcurrencyFetchEngine:
             # Step 2: Fetch Today's Live Candle
             candles, status, err, sym_used = self.client.fetch_live_quote_candle(sym, target_date)
             if not candles:
+                if healed_count > 0:
+                    return True, healed_count, healed_count, 0, None
+                if sym in NSE_INDEX_SYMBOLS:
+                    # Index candle published at market close
+                    return True, 0, 0, 0, None
                 return False, 0, 0, 0, err or "Empty candle response"
             
             today_df, invalids = self.store.parse_raw_candles_to_df(candles)
             if today_df.empty:
+                if sym in NSE_INDEX_SYMBOLS:
+                    return True, 0, 0, 0, None
                 return False, 0, 0, 0, "No valid candles after OHLCV validation"
 
             today_row = today_df.iloc[-1]
@@ -361,7 +374,7 @@ class ConcurrencyFetchEngine:
             # Step 3: Check for Stock Split / Consolidation (>20% price shift)
             if prev_candle is not None and prev_close > 0 and today_open > 0:
                 shift_pct = abs(today_open - prev_close) / prev_close
-                if shift_pct > 0.20 and sym not in {"NIFTY", "BANKNIFTY", "NIFTY500"}:
+                if shift_pct > 0.20 and sym not in NSE_INDEX_SYMBOLS:
                     logger.warning(
                         f"[CORPORATE ACTION / SPLIT DETECTED] {sym}: Yesterday Close={prev_close:.2f}, "
                         f"Today Open={today_open:.2f} (Shift: {shift_pct*100:.2f}% > 20%). "

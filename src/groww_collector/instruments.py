@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 import requests
 import pandas as pd
 
-from .config import CollectorConfig, DEFAULT_CONFIG, IST_TZ
+from .config import CollectorConfig, DEFAULT_CONFIG, IST_TZ, NSE_INDEX_CATALOG
 from .groww_client import GrowwAPIClient
 from .parquet_store import ParquetStore
 from .migration_tracker import MigrationTracker
@@ -119,8 +119,8 @@ class InstrumentSyncService:
             except Exception as e:
                 logger.warning(f"Could not load bundled active list: {e}")
 
-        # Add benchmark indices: NIFTY and BANKNIFTY
-        for idx_sym, idx_name in [("NIFTY", "Nifty 50 Index"), ("BANKNIFTY", "Nifty Bank Index")]:
+        # Add all 39 NSE indices
+        for idx_sym, idx_name in NSE_INDEX_CATALOG.items():
             if idx_sym not in records:
                 records[idx_sym] = {
                     "Symbol": idx_sym,
@@ -129,14 +129,6 @@ class InstrumentSyncService:
                     "ISIN": idx_sym,
                     "Listing_Date": "2015-01-01",
                 }
-        if (self.config.data_dir / "NIFTY500_Day.parquet").exists() and "NIFTY500" not in records:
-            records["NIFTY500"] = {
-                "Symbol": "NIFTY500",
-                "Company_Name": "Nifty 500 Index",
-                "Series": "INDEX",
-                "ISIN": "NIFTY500",
-                "Listing_Date": "2015-01-01",
-            }
 
         # Include any existing parquet files present on disk so everything in data directory is cataloged
         if self.config.data_dir.exists():
